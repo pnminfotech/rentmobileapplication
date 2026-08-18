@@ -6,6 +6,12 @@ const invoiceItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Organization",
+    default: null,
+    index: true,
+  },
   tenantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Form', index: true, required: true },
   period: { type: String, required: true },           // 'YYYY-MM'
   dueDate: { type: Date, required: true },
@@ -17,5 +23,6 @@ const invoiceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 invoiceSchema.index({ tenantId: 1, period: 1 }, { unique: true });
+invoiceSchema.index({ organizationId: 1, period: 1, status: 1 });
 
 module.exports = mongoose.model('Invoice', invoiceSchema);

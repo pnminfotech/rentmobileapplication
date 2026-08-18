@@ -7,6 +7,9 @@ const mongoose = require("mongoose");
 const Project = require("../models/Project");
 const Supplier = require("../models/Supplier");
 const multer = require("multer"); // Import multer
+const authAdmin = require("../middleware/adminAuth");
+
+router.use(authAdmin);
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {

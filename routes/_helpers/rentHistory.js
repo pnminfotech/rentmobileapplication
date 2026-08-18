@@ -202,15 +202,8 @@ function getCycleStartForMonth(tenant = {}, y, m) {
   const joinDate = toValidDate(tenant.joiningDate);
   if (!joinDate) return null;
 
-  let firstBillYM;
-  if (tenant.firstRentMonth) {
-    const parsed = parseMonthKey(tenant.firstRentMonth);
-    if (!parsed) return null;
-    firstBillYM = parsed.y * 12 + parsed.m;
-  } else {
-    const isAdvance = String(tenant.firstRentStatus || "").trim() === "ADVANCE_PAID";
-    firstBillYM = joinDate.getFullYear() * 12 + joinDate.getMonth() + (isAdvance ? 0 : 1);
-  }
+  const firstBillYM = getFirstBillYM(tenant, joinDate);
+  if (firstBillYM === null) return null;
 
   const cellYM = y * 12 + m;
   if (cellYM < firstBillYM) return null;
@@ -220,6 +213,23 @@ function getCycleStartForMonth(tenant = {}, y, m) {
   cycleStart.setHours(0, 0, 0, 0);
   cycleStart.setMonth(cycleStart.getMonth() + cycleIndex);
   return cycleStart;
+}
+
+function getFirstBillYM(tenant = {}, joinDateValue = null) {
+  const joinDate = toValidDate(joinDateValue) || toValidDate(tenant.joiningDate);
+  if (!joinDate) return null;
+
+  const isAdvance = String(tenant.firstRentStatus || "").trim() === "ADVANCE_PAID";
+  const joinYM = joinDate.getFullYear() * 12 + joinDate.getMonth();
+
+  if (!tenant.firstRentMonth) return joinYM;
+
+  const parsed = parseMonthKey(tenant.firstRentMonth);
+  if (!parsed) return null;
+
+  const parsedYM = parsed.y * 12 + parsed.m;
+  const legacyNormalPaymentMonth = !isAdvance && parsedYM === joinYM + 1;
+  return legacyNormalPaymentMonth ? joinYM : parsedYM;
 }
 
 function buildRentTimeline(tenant = {}, roomsData = []) {
@@ -312,48 +322,75 @@ function buildRentTimeline(tenant = {}, roomsData = []) {
 }
 
 function getExpectedRentForMonth(tenant = {}, y, m, roomsData = []) {
+  return getRentProrationForMonth(tenant, y, m, roomsData).expected;
+}
+
+function dayNumber(value) {
+  const date = toValidDate(value);
+  if (!date) return 0;
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000;
+}
+
+function getRentProrationForMonth(tenant = {}, y, m, roomsData = []) {
   const snapshots = buildRentTimeline(tenant, roomsData);
-  if (!snapshots.length) return getCurrentMonthlyRent(tenant, roomsData);
+  const fallback = getCurrentMonthlyRent(tenant, roomsData);
 
   const cycleStart = getCycleStartForMonth(tenant, y, m);
-  if (!cycleStart) return getCurrentMonthlyRent(tenant, roomsData);
+  if (!cycleStart) return { expected: 0, cycleStart: null, cycleEnd: null, totalDays: 0, segments: [] };
 
   const cycleEnd = new Date(cycleStart);
   cycleEnd.setMonth(cycleEnd.getMonth() + 1);
-  let expected = 0;
   const cycleStartTime = startOfDayTime(cycleStart);
   const cycleEndTime = startOfDayTime(cycleEnd);
-  const hasSelectedShiftDate = Boolean(
-    tenant.shiftEffectiveFrom || tenant.shiftDate || tenant.effectiveFrom
-  );
+  const totalDays = Math.max(dayNumber(cycleEnd) - dayNumber(cycleStart), 1);
+  let activeRate = fallback;
 
-  for (const snap of snapshots) {
-    const isLegacyMonthStartShift =
-      !hasSelectedShiftDate &&
-      snap.source === "shift" &&
-      snap.effectiveFrom instanceof Date &&
-      snap.effectiveFrom.getDate() === 1;
-    const appliesToCycle = isLegacyMonthStartShift
-      ? startOfDayTime(snap.effectiveFrom) <= cycleStartTime
-      : startOfDayTime(snap.effectiveFrom) < cycleEndTime;
-
-    if (appliesToCycle) {
-      expected = toNum(snap.baseRent || snap.rentAmount);
-    } else {
-      break;
+  snapshots.forEach((snapshot) => {
+    if (startOfDayTime(snapshot.effectiveFrom) <= cycleStartTime) {
+      activeRate = toNum(snapshot.baseRent || snapshot.rentAmount) || activeRate;
     }
+  });
+
+  const changes = snapshots.filter((snapshot) => {
+    const time = startOfDayTime(snapshot.effectiveFrom);
+    return time > cycleStartTime && time < cycleEndTime;
+  });
+  const segments = [];
+  let cursor = new Date(cycleStart);
+
+  for (const change of changes) {
+    const end = new Date(change.effectiveFrom);
+    end.setHours(0, 0, 0, 0);
+    const days = Math.max(dayNumber(end) - dayNumber(cursor), 0);
+    if (days > 0) segments.push({ from: new Date(cursor), to: end, days, monthlyRate: activeRate, amount: activeRate * days / totalDays });
+    cursor = end;
+    activeRate = toNum(change.baseRent || change.rentAmount) || activeRate;
   }
 
-  let resolved = expected || getCurrentMonthlyRent(tenant, roomsData);
-  const shiftCutoff = getLatestShiftCutoffDate(tenant);
-  const paidAmount = getPaidAmountForMonth(tenant.rents, y, m);
+  const remainingDays = Math.max(dayNumber(cycleEnd) - dayNumber(cursor), 0);
+  if (remainingDays > 0) segments.push({ from: new Date(cursor), to: new Date(cycleEnd), days: remainingDays, monthlyRate: activeRate, amount: activeRate * remainingDays / totalDays });
+  const expected = Math.round(segments.reduce((sum, segment) => sum + segment.amount, 0));
+  return { expected: expected || fallback, cycleStart, cycleEnd, totalDays, segments };
+}
 
-  // Do not retroactively raise older paid cycles after a later bed shift.
-  if (shiftCutoff && cycleEnd <= shiftCutoff && paidAmount > 0 && paidAmount < resolved) {
-    resolved = paidAmount;
+function getRentCycleForDate(tenant = {}, value) {
+  const date = toValidDate(value);
+  const joiningDate = toValidDate(tenant.joiningDate);
+  if (!date || !joiningDate) return null;
+
+  const firstYM = getFirstBillYM(tenant, joiningDate);
+  if (firstYM === null) return null;
+  let index = (date.getFullYear() - joiningDate.getFullYear()) * 12 + date.getMonth() - joiningDate.getMonth();
+  let labelYM = firstYM + index;
+  let y = Math.floor(labelYM / 12);
+  let m = labelYM % 12;
+  let start = getCycleStartForMonth(tenant, y, m);
+  if (start && date < start) {
+    index -= 1; labelYM = firstYM + index; y = Math.floor(labelYM / 12); m = labelYM % 12; start = getCycleStartForMonth(tenant, y, m);
   }
-
-  return resolved;
+  if (!start) return null;
+  const end = new Date(start); end.setMonth(end.getMonth() + 1);
+  return { y, m, month: formatMonthKey(y, m), cycleStart: start, cycleEnd: end };
 }
 
 function getPaymentMonth(rent = {}) {
@@ -374,7 +411,8 @@ function getPaidAmountForMonth(rents = [], y, m) {
   }, 0);
 }
 
-function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = []) {
+function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = [], options = {}) {
+  const includePartialCycle = Boolean(options.includePartialCycle);
   const cutoff = toValidDate(cutoffDate);
   if (!cutoff || !tenant?.joiningDate) return [];
 
@@ -383,17 +421,10 @@ function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = []) {
   const joinDate = toValidDate(tenant.joiningDate);
   if (!joinDate) return [];
 
-  const firstBill = tenant.firstRentMonth
-    ? parseMonthKey(tenant.firstRentMonth)
-    : null;
+  const isAdvance = String(tenant.firstRentStatus || "").trim() === "ADVANCE_PAID";
 
-  let cursorYM;
-  if (firstBill) {
-    cursorYM = firstBill.y * 12 + firstBill.m;
-  } else {
-    const isAdvance = String(tenant.firstRentStatus || "").trim() === "ADVANCE_PAID";
-    cursorYM = joinDate.getFullYear() * 12 + joinDate.getMonth() + (isAdvance ? 0 : 1);
-  }
+  let cursorYM = getFirstBillYM(tenant, joinDate);
+  if (cursorYM === null) return [];
 
   const cutoffYM = cutoff.getFullYear() * 12 + cutoff.getMonth();
   const maxYM = cutoffYM + 1;
@@ -410,9 +441,27 @@ function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = []) {
 
     const cycleEnd = new Date(cycleStart);
     cycleEnd.setMonth(cycleEnd.getMonth() + 1);
-    if (cycleEnd > cutoff) break;
+    if (dayNumber(cycleStart) > dayNumber(cutoff)) break;
 
-    const expected = getExpectedRentForMonth(tenant, y, m, roomsData);
+    const fullCycle = getRentProrationForMonth(tenant, y, m, roomsData);
+    const isPartial = cycleEnd > cutoff;
+    if (isPartial && !includePartialCycle && !isAdvance) break;
+    const chargeUntil = isPartial ? new Date(cutoff) : new Date(cycleEnd);
+    if (isPartial) {
+      chargeUntil.setDate(chargeUntil.getDate() + 1);
+      chargeUntil.setHours(0, 0, 0, 0);
+    }
+    const expected = isPartial && includePartialCycle
+      ? Math.round((fullCycle.segments || []).reduce((sum, segment) => {
+          const from = toValidDate(segment.from);
+          const to = toValidDate(segment.to);
+          if (!from || !to) return sum;
+          const clippedFrom = dayNumber(from) < dayNumber(cycleStart) ? cycleStart : from;
+          const clippedTo = dayNumber(to) > dayNumber(chargeUntil) ? chargeUntil : to;
+          const days = Math.max(dayNumber(clippedTo) - dayNumber(clippedFrom), 0);
+          return sum + (toNum(segment.monthlyRate) * days / Math.max(fullCycle.totalDays || 0, 1));
+        }, 0))
+      : fullCycle.expected;
 
     if (expected > 0) {
       const paid = getPaidAmountForMonth(tenant.rents, y, m);
@@ -424,14 +473,74 @@ function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = []) {
           expected,
           paid,
           outstanding,
+          cycleStart,
+          cycleEnd,
+          chargedUntil: chargeUntil,
+          chargedDays: isPartial
+            ? Math.max(dayNumber(chargeUntil) - dayNumber(cycleStart), 0)
+            : fullCycle.totalDays,
+          totalDays: fullCycle.totalDays,
+          partial: isPartial,
         });
       }
     }
+
+    if (isPartial) break;
 
     cursorYM += 1;
   }
 
   return unpaid;
+}
+
+function getRentCyclesBetweenDates(tenant = {}, startValue, endValue, roomsData = []) {
+  const start = toValidDate(startValue);
+  const end = toValidDate(endValue);
+  const joinDate = toValidDate(tenant.joiningDate);
+  if (!start || !end || !joinDate || start > end) return [];
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+
+  let cursorYM = getFirstBillYM(tenant, joinDate);
+  if (cursorYM === null) return [];
+  const maxYM = end.getFullYear() * 12 + end.getMonth() + 2;
+  const cycles = [];
+
+  while (cursorYM <= maxYM) {
+    const y = Math.floor(cursorYM / 12);
+    const m = cursorYM % 12;
+    const cycleStart = getCycleStartForMonth(tenant, y, m);
+    if (!cycleStart) { cursorYM += 1; continue; }
+    const cycleEnd = new Date(cycleStart);
+    cycleEnd.setMonth(cycleEnd.getMonth() + 1);
+    if (cycleEnd > end) break;
+    if (cycleEnd >= start) {
+      const expected = getExpectedRentForMonth(tenant, y, m, roomsData);
+      const paid = getPaidAmountForMonth(tenant.rents, y, m);
+      cycles.push({ month: formatMonthKey(y, m), cycleStart, cycleEnd, expected, paid, pending: Math.max(expected - paid, 0) });
+    }
+    cursorYM += 1;
+  }
+  return cycles;
+}
+
+function getPaymentsBetweenDates(tenant = {}, startValue, endValue) {
+  const start = toValidDate(startValue);
+  const end = toValidDate(endValue);
+  if (!start || !end || start > end) return [];
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+  const transactions = [];
+  (Array.isArray(tenant.rents) ? tenant.rents : []).forEach((rent) => {
+    const payments = Array.isArray(rent.payments) && rent.payments.length
+      ? rent.payments
+      : [{ amount: rent.rentAmount, date: rent.date, paymentMode: rent.paymentMode, utr: rent.utr, note: rent.note }];
+    payments.forEach((payment) => {
+      const date = toValidDate(payment.date);
+      if (date && date >= start && date <= end) transactions.push({ month: rent.month, amount: toNum(payment.amount), date, paymentMode: payment.paymentMode || "Cash", utr: payment.utr || "", note: payment.note || "" });
+    });
+  });
+  return transactions;
 }
 
 function appendRentHistorySnapshot(existing = {}, incoming = {}) {
@@ -503,9 +612,16 @@ module.exports = {
   appendRentHistorySnapshot,
   buildRentTimeline,
   getExpectedRentForMonth,
+  getRentProrationForMonth,
+  getRentCycleForDate,
+  getPaidAmountForMonth,
+  parseMonthKey,
   getCurrentMonthlyRent,
   getCycleStartForMonth,
+  getFirstBillYM,
   getUnpaidRentBeforeDate,
+  getRentCyclesBetweenDates,
+  getPaymentsBetweenDates,
   firstDayOfMonth,
   firstDayOfNextMonth,
 };

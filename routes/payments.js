@@ -65,6 +65,12 @@ const router = express.Router();
 const PaymentNotification = require("../models/PaymentNotification");
 const Payment = require("../models/Payment");
 const Form = require("../models/formModels"); // your tenant collection ("Form")
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { scopedQuery, scopedCreate } = require("../utils/organizationScope");
+
+router.use(attachSystemAuthIfPresent);
+router.use(authAdmin);
 
 // --- helpers ---
 /** Convert (year, month 1..12) -> Date at first of that month. Falls back to "now". */
@@ -75,13 +81,17 @@ function monthToFirstDate(year, month1to12) {
   return new Date(y, mIdx, 1);
 }
 
+function toMonthKey(y, m /* 0..11 */) {
+  return `${new Date(y, m, 1).toLocaleString("en-US", { month: "short" })}-${String(y).slice(-2)}`;
+}
+
 /* =========================
  * LIST / READ NOTIFICATIONS
  * ========================= */
 router.get("/notifications", async (req, res) => {
   try {
     const { status = "all", limit = 30 } = req.query;
-    const q = status === "all" ? {} : { status };
+    const q = scopedQuery(req, status === "all" ? {} : { status });
     const items = await PaymentNotification.find(q)
       .sort({ createdAt: -1 })
       .limit(Number(limit))
@@ -97,7 +107,7 @@ router.get("/notifications", async (req, res) => {
 router.post("/notifications/read-all", async (req, res) => {
   try {
     const { status = "all" } = req.body || {};
-    const q = status === "all" ? {} : { status };
+    const q = scopedQuery(req, status === "all" ? {} : { status });
     await PaymentNotification.updateMany(q, { $set: { read: true } });
     res.sendStatus(204);
   } catch (err) {
@@ -108,7 +118,11 @@ router.post("/notifications/read-all", async (req, res) => {
 
 router.patch("/notifications/:id/read", async (req, res) => {
   try {
-    await PaymentNotification.findByIdAndUpdate(req.params.id, { $set: { read: true } });
+    const updated = await PaymentNotification.findOneAndUpdate(
+      scopedQuery(req, { _id: req.params.id }),
+      { $set: { read: true } }
+    );
+    if (!updated) return res.sendStatus(404);
     res.sendStatus(204);
   } catch (err) {
     console.error("PATCH /payments/notifications/:id/read error:", err);
@@ -125,20 +139,22 @@ router.patch("/notifications/:id/read", async (req, res) => {
  */
 router.post("/approve/:id", async (req, res) => {
   try {
-    const notif = await PaymentNotification.findById(req.params.id);
+    const notif = await PaymentNotification.findOne(scopedQuery(req, { _id: req.params.id }));
     if (!notif) return res.status(404).json({ message: "notification not found" });
 
     // Load payment (by linked id; fall back to search)
-    let pay = notif.paymentId ? await Payment.findById(notif.paymentId) : null;
+    let pay = notif.paymentId
+      ? await Payment.findOne(scopedQuery(req, { _id: notif.paymentId }))
+      : null;
     if (!pay) {
-      pay = await Payment.findOne({
+      pay = await Payment.findOne(scopedQuery(req, {
         tenant: notif.tenantId,
         status: "reported",
         amount: notif.amount,
         month: notif.month,
         year: notif.year,
         utr: notif.utr || undefined,
-      }).sort({ createdAt: -1 });
+      })).sort({ createdAt: -1 });
     }
     if (!pay) return res.status(404).json({ message: "linked payment not found" });
 
@@ -147,7 +163,7 @@ router.post("/approve/:id", async (req, res) => {
     }
 
     // Upsert a rent record into the tenant form for that month
-    const tenant = await Form.findById(notif.tenantId);
+    const tenant = await Form.findOne(scopedQuery(req, { _id: notif.tenantId }));
     if (!tenant) return res.status(404).json({ message: "tenant not found" });
 
     const rentDate = monthToFirstDate(pay.year, pay.month);
@@ -160,10 +176,6 @@ router.post("/approve/:id", async (req, res) => {
     //   return d.getFullYear() === y && d.getMonth() === m;
     // });
 // ⬇️ add near the top of the file if you like (helper)
-function toMonthKey(y, m /* 0..11 */) {
-  return `${new Date(y, m, 1).toLocaleString("en-US",{ month:"short" })}-${String(y).slice(-2)}`;
-}
-
 // ... inside /approve/:id AFTER you computed `rentDate`, `y`, `m`
 const monthKey = toMonthKey(y, m);
 
@@ -222,19 +234,21 @@ await pay.save();
  */
 router.post("/reject/:id", async (req, res) => {
   try {
-    const notif = await PaymentNotification.findById(req.params.id);
+    const notif = await PaymentNotification.findOne(scopedQuery(req, { _id: req.params.id }));
     if (!notif) return res.status(404).json({ message: "notification not found" });
 
-    let pay = notif.paymentId ? await Payment.findById(notif.paymentId) : null;
+    let pay = notif.paymentId
+      ? await Payment.findOne(scopedQuery(req, { _id: notif.paymentId }))
+      : null;
     if (!pay) {
-      pay = await Payment.findOne({
+      pay = await Payment.findOne(scopedQuery(req, {
         tenant: notif.tenantId,
         status: "reported",
         amount: notif.amount,
         month: notif.month,
         year: notif.year,
         utr: notif.utr || undefined,
-      }).sort({ createdAt: -1 });
+      })).sort({ createdAt: -1 });
     }
     if (!pay) return res.status(404).json({ message: "linked payment not found" });
 
@@ -262,7 +276,7 @@ router.post("/reject/:id", async (req, res) => {
 router.get("/reports", async (req, res) => {
   try {
     const { status = "all", limit = 50 } = req.query;
-    const q = status === "all" ? {} : { status };
+    const q = scopedQuery(req, status === "all" ? {} : { status });
     const items = await Payment.find(q)
       .sort({ createdAt: -1 })
       .limit(Number(limit))
@@ -276,18 +290,18 @@ router.get("/reports", async (req, res) => {
 // One-off: backfill missing notifications for reported payments
 router.post('/bootstrap-notifs', async (req, res) => {
   try {
-    const PaymentNotification = require('../models/PaymentNotification');
-    const Form = require('../models/formModels');
-    const reported = await Payment.find({ status: 'reported' }).lean();
+    const reported = await Payment.find(scopedQuery(req, { status: 'reported' })).lean();
     const made = [];
 
     for (const pay of reported) {
-      const exists = await PaymentNotification.findOne({ paymentId: pay._id });
+      const exists = await PaymentNotification.findOne(scopedQuery(req, { paymentId: pay._id }));
       if (exists) continue;
 
       if (!pay.tenant) continue; // safety
 
-      const doc = await PaymentNotification.create({
+      const tenant = await Form.findById(pay.tenant).select("organizationId").lean();
+      const doc = await PaymentNotification.create(scopedCreate(req, {
+        organizationId: pay.organizationId || tenant?.organizationId || null,
         tenantId: pay.tenant,
         paymentId: pay._id,
         amount: pay.amount,
@@ -297,7 +311,7 @@ router.post('/bootstrap-notifs', async (req, res) => {
         note: pay.note,
         status: 'pending',
         read: false,
-      });
+      }));
       made.push(doc._id);
     }
 

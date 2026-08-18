@@ -1,19 +1,17 @@
-// routes/adminNotifications.js
 const router = require("express").Router();
+
 const Notification = require("../models/Notification");
 const authAdmin = require("../middleware/adminAuth");
+const { scopedQuery } = require("../utils/organizationScope");
 
-
-// ⚠️ TEMPORARY: disable admin auth for testing
-const adminOnly = (req, res, next) => next();
-
-// ✅ GET all attendance-related notifications
-router.get("/notifications/attendance", adminOnly, async (req, res, next) => {
+router.get("/notifications/attendance", authAdmin, async (req, res, next) => {
   try {
-    const docs = await Notification.find({
-      type: "system",
-      "payload.kind": { $regex: "^attendance_" }
-    })
+    const docs = await Notification.find(
+      scopedQuery(req, {
+        type: "system",
+        "payload.kind": { $regex: "^attendance_" },
+      })
+    )
       .sort({ createdAt: -1 })
       .limit(50)
       .populate("tenantId", "name roomNo bedNo");
@@ -24,16 +22,15 @@ router.get("/notifications/attendance", adminOnly, async (req, res, next) => {
   }
 });
 
-
-// ✅ Mark notification as seen/acknowledged
 router.post("/notifications/:id/seen", authAdmin, async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const doc = await Notification.findByIdAndUpdate(
-      id,
-     { $set: { read: true } }
-      //{ new: true }
+    const doc = await Notification.findOneAndUpdate(
+      scopedQuery(req, { _id: req.params.id }),
+      { $set: { read: true } },
+      { new: true }
     );
+    if (!doc) return res.status(404).json({ message: "Notification not found" });
+
     res.json({ ok: true, updated: doc });
   } catch (err) {
     next(err);

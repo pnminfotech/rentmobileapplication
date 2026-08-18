@@ -155,18 +155,127 @@ const router = express.Router();
 
 const Form = require("../models/formModels");
 const LeaveRequest = require("../models/LeaveRequest");
+const Notification = require("../models/Notification");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent, requireSystemAuth } = require("../middleware/saasAuth");
+const { scopedQuery } = require("../utils/organizationScope");
 
-// ---- (OPTIONAL) admin auth; swap with your real middleware if you have one
-const adminOnly = (req, res, next) => next();
+function notificationScope(req) {
+  if (req.systemUser?.role === "superadmin") {
+    return { audience: "superadmin" };
+  }
+  return {
+    $or: [
+      { userId: req.systemUser?._id },
+      { organizationId: req.organizationId },
+      { audience: "organization", organizationId: req.organizationId },
+      { audience: "system_admin", organizationId: req.organizationId },
+    ],
+  };
+}
+
+function activeNotificationScope(req) {
+  return {
+    $and: [
+      notificationScope(req),
+      { status: { $ne: "resolved" } },
+      {
+        $or: [
+          { expiresAt: null },
+          { expiresAt: { $exists: false } },
+          { expiresAt: { $gt: new Date() } },
+        ],
+      },
+    ],
+  };
+}
+
+// GET /api/notifications?status=all&limit=50
+router.get("/notifications", requireSystemAuth, async (req, res) => {
+  try {
+    const { status = "all", unreadOnly = "false", limit = 50 } = req.query;
+    const query = activeNotificationScope(req);
+    if (status !== "all") query.$and.push({ status });
+    if (String(unreadOnly).toLowerCase() === "true") {
+      query.$and.push({ $or: [{ status: "unread" }, { read: false }] });
+    }
+
+    const items = await Notification.find(query)
+      .sort({ createdAt: -1 })
+      .limit(Math.min(Number(limit) || 50, 200))
+      .populate("organizationId", "name ownerName email status")
+      .lean();
+
+    res.json(items);
+  } catch (err) {
+    res.status(500).json({ message: "Unable to load notifications" });
+  }
+});
+
+// GET /api/notifications/unread-count
+router.get("/notifications/unread-count", requireSystemAuth, async (req, res) => {
+  try {
+    const query = activeNotificationScope(req);
+    query.$and.push({ $or: [{ status: "unread" }, { read: false }] });
+    const count = await Notification.countDocuments(query);
+    res.json({ count });
+  } catch (err) {
+    res.status(500).json({ message: "Unable to load notification count" });
+  }
+});
+
+// PATCH /api/notifications/:id/read
+router.patch("/notifications/:id/read", requireSystemAuth, async (req, res) => {
+  try {
+    const updated = await Notification.findOneAndUpdate(
+      { $and: [{ _id: req.params.id }, notificationScope(req), { status: { $ne: "resolved" } }] },
+      { $set: { read: true, status: "read" } },
+      { new: true }
+    );
+    if (!updated) return res.status(404).json({ message: "Notification not found" });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: "Unable to update notification" });
+  }
+});
+
+// PATCH /api/notifications/read-all
+router.patch("/notifications/read-all", requireSystemAuth, async (req, res) => {
+  try {
+    const query = activeNotificationScope(req);
+    query.$and.push({ $or: [{ status: "unread" }, { read: false }] });
+    const result = await Notification.updateMany(query, { $set: { read: true, status: "read" } });
+    res.json({ modifiedCount: result.modifiedCount || 0 });
+  } catch (err) {
+    res.status(500).json({ message: "Unable to update notifications" });
+  }
+});
+
+// PATCH /api/notifications/:id/resolve
+router.patch("/notifications/:id/resolve", requireSystemAuth, async (req, res) => {
+  try {
+    const updated = await Notification.findOneAndUpdate(
+      { $and: [{ _id: req.params.id }, notificationScope(req), { status: { $ne: "resolved" } }] },
+      { $set: { read: true, status: "resolved", resolvedAt: new Date() } },
+      { new: true }
+    );
+    if (!updated) return res.status(404).json({ message: "Notification not found" });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: "Unable to update notification" });
+  }
+});
+
+router.use(attachSystemAuthIfPresent);
 
 // =======================
 // ADMIN: Leave notifications
 // =======================
 
 // GET /api/admin/notifications/leave?status=pending&limit=50
-router.get("/admin/notifications/leave", adminOnly, async (req, res) => {
+router.get("/admin/notifications/leave", authAdmin, async (req, res) => {
   const { status = "pending", limit = 50 } = req.query;
-  const q = status === "all" ? {} : { status };
+  const q = scopedQuery(req, status === "all" ? {} : { status });
 
   const docs = await LeaveRequest.find(q)
     .sort({ createdAt: -1 })
@@ -192,8 +301,8 @@ router.get("/admin/notifications/leave", adminOnly, async (req, res) => {
 });
 
 // POST /api/admin/leave/:id/approve
-router.post("/admin/leave/:id/approve", adminOnly, async (req, res) => {
-  const lr = await LeaveRequest.findById(req.params.id);
+router.post("/admin/leave/:id/approve", authAdmin, async (req, res) => {
+  const lr = await LeaveRequest.findOne(scopedQuery(req, { _id: req.params.id }));
   if (!lr) return res.status(404).json({ message: "Leave request not found" });
   if (lr.status !== "pending") return res.status(400).json({ message: "Already processed" });
 
@@ -201,15 +310,15 @@ router.post("/admin/leave/:id/approve", adminOnly, async (req, res) => {
   await lr.save();
 
   if (lr.tenant && lr.leaveDate) {
-    await Form.findByIdAndUpdate(lr.tenant, { $set: { leaveDate: lr.leaveDate } });
+    await Form.findOneAndUpdate(scopedQuery(req, { _id: lr.tenant }), { $set: { leaveDate: lr.leaveDate } });
   }
 
   res.json({ ok: true });
 });
 
 // POST /api/admin/leave/:id/reject
-router.post("/admin/leave/:id/reject", adminOnly, async (req, res) => {
-  const lr = await LeaveRequest.findById(req.params.id);
+router.post("/admin/leave/:id/reject", authAdmin, async (req, res) => {
+  const lr = await LeaveRequest.findOne(scopedQuery(req, { _id: req.params.id }));
   if (!lr) return res.status(404).json({ message: "Leave request not found" });
   if (lr.status !== "pending") return res.status(400).json({ message: "Already processed" });
 
@@ -221,12 +330,13 @@ router.post("/admin/leave/:id/reject", adminOnly, async (req, res) => {
 
 // DEV-ONLY: seed one pending leave so the bell can see something
 // POST or GET /api/admin/notifications/leave/_seed
-router.post("/admin/notifications/leave/_seed", async (req, res) => {
+router.post("/admin/notifications/leave/_seed", authAdmin, async (req, res) => {
   try {
-    const anyTenant = await Form.findOne().lean();
+    const anyTenant = await Form.findOne(scopedQuery(req)).lean();
     if (!anyTenant) return res.status(400).json({ message: "No tenant to attach" });
 
     const doc = await LeaveRequest.create({
+      organizationId: anyTenant.organizationId || req.organizationId || null,
       tenant: anyTenant._id,
       tenantName: anyTenant.name,
       leaveDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
@@ -238,12 +348,13 @@ router.post("/admin/notifications/leave/_seed", async (req, res) => {
     res.status(500).json({ message: e.message });
   }
 });
-router.get("/admin/notifications/leave/_seed", async (req, res) => {
+router.get("/admin/notifications/leave/_seed", authAdmin, async (req, res) => {
   try {
-    const anyTenant = await Form.findOne().lean();
+    const anyTenant = await Form.findOne(scopedQuery(req)).lean();
     if (!anyTenant) return res.status(400).json({ message: "No tenant to attach" });
 
     const doc = await LeaveRequest.create({
+      organizationId: anyTenant.organizationId || req.organizationId || null,
       tenant: anyTenant._id,
       tenantName: anyTenant.name,
       leaveDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),

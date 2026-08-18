@@ -214,7 +214,9 @@ router.get("/tenant/attendance/list", authTenant, async (req, res, next) => {
   const Attendance = require("../models/Attendance");
   try {
     const tenantId = req.tenant?._id;
-    const list = await Attendance.find({ tenantId }).sort({ createdAt: -1 }).limit(10).lean();
+    const query = { tenantId };
+    if (req.tenant?.organizationId) query.organizationId = req.tenant.organizationId;
+    const list = await Attendance.find(query).sort({ createdAt: -1 }).limit(10).lean();
     res.json({ ok: true, attendance: list });
   } catch (err) {
     next(err);

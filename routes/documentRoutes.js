@@ -1,8 +1,10 @@
 // routes/documentRoutes.js
 const express = require("express");
 const mongoose = require("mongoose");
+const authAdmin = require("../middleware/adminAuth");
 
 const router = express.Router();
+router.use(authAdmin);
 const { ObjectId } = mongoose.Types;
 
 router.get("/:id", async (req, res) => {

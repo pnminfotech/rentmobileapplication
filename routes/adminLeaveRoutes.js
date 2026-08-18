@@ -6,6 +6,12 @@ const mongoose = require("mongoose");
 // --- MODELS ---
 // Adjust paths to match your project:
 const Form = require("../models/formModels");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { scopedQuery } = require("../utils/organizationScope");
+
+router.use(attachSystemAuthIfPresent);
+router.use(authAdmin);
 
 // If you already have a LeaveRequest model, reuse it and DELETE this schema:
 const LeaveRequestSchema = new mongoose.Schema(
@@ -32,7 +38,7 @@ router.get("/notifications/leave", async (req, res) => {
     const status = req.query.status || "pending";
     const limit = Math.min(Number(req.query.limit) || 50, 200);
 
-    const q = status === "all" ? {} : { status };
+    const q = scopedQuery(req, status === "all" ? {} : { status });
     const docs = await LeaveRequest.find(q)
       .populate("tenant", "name roomNo bedNo")
       .sort({ createdAt: -1 })
@@ -64,7 +70,7 @@ router.get("/notifications/leave", async (req, res) => {
 /** POST /api/admin/leave/:id/approve */
 router.post("/leave/:id/approve", async (req, res) => {
   try {
-    const r = await LeaveRequest.findById(req.params.id).populate("tenant", "_id");
+    const r = await LeaveRequest.findOne(scopedQuery(req, { _id: req.params.id })).populate("tenant", "_id");
     if (!r) return res.status(404).json({ message: "Leave request not found" });
 
     r.status = "approved";
@@ -72,7 +78,7 @@ router.post("/leave/:id/approve", async (req, res) => {
 
     // Also stamp tenant’s leaveDate for downstream UI
     if (r.tenant?._id && r.leaveDate) {
-      await Form.findByIdAndUpdate(r.tenant._id, { $set: { leaveDate: r.leaveDate } });
+      await Form.findOneAndUpdate(scopedQuery(req, { _id: r.tenant._id }), { $set: { leaveDate: r.leaveDate } });
     }
 
     res.json({ ok: true, request: r });
@@ -85,7 +91,7 @@ router.post("/leave/:id/approve", async (req, res) => {
 /** POST /api/admin/leave/:id/reject */
 router.post("/leave/:id/reject", async (req, res) => {
   try {
-    const r = await LeaveRequest.findById(req.params.id);
+    const r = await LeaveRequest.findOne(scopedQuery(req, { _id: req.params.id }));
     if (!r) return res.status(404).json({ message: "Leave request not found" });
     r.status = "rejected";
     await r.save();
@@ -98,7 +104,8 @@ router.post("/leave/:id/reject", async (req, res) => {
 
 /** (Optional) mark one as read so it disappears from “unread” views later */
 router.patch("/leave/:id/read", async (req, res) => {
-  await LeaveRequest.findByIdAndUpdate(req.params.id, { $set: { read: true } });
+  const updated = await LeaveRequest.findOneAndUpdate(scopedQuery(req, { _id: req.params.id }), { $set: { read: true } });
+  if (!updated) return res.sendStatus(404);
   res.sendStatus(204);
 });
 

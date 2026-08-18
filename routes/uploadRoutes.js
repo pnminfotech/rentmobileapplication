@@ -4,11 +4,36 @@ const multer = require("multer");
 const sharp = require("sharp");
 const ImageKit = require("imagekit");
 const path = require("path");
+const authAdmin = require("../middleware/adminAuth");
+const Invite = require("../models/Invite");
 
 const router = express.Router();
 
 // ✅ Multer memory (not disk)
-const upload = multer({ storage: multer.memoryStorage() });
+const MAX_IMAGE_UPLOAD_SIZE = 2 * 1024 * 1024;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_IMAGE_UPLOAD_SIZE, files: 10 },
+});
+
+function uploadDocuments(req, res, next) {
+  upload.array("documents", 10)(req, res, (err) => {
+    if (!err) return next();
+
+    if (err instanceof multer.MulterError) {
+      const message =
+        err.code === "LIMIT_FILE_SIZE"
+          ? "Each document image must be 2 MB or smaller."
+          : err.code === "LIMIT_FILE_COUNT"
+          ? "You can upload up to 10 documents at a time."
+          : err.message || "Document upload failed.";
+
+      return res.status(400).json({ ok: false, message });
+    }
+
+    return res.status(400).json({ ok: false, message: err.message || "Document upload failed." });
+  });
+}
 
 function hasImageKitConfig() {
   return (
@@ -73,7 +98,88 @@ async function compressUnder10KB(buf) {
 }
 
 // POST /api/uploads/docs  ✅ ImageKit-only
-router.post("/docs", upload.array("documents", 10), async (req, res) => {
+function tokenFromUrl(value) {
+  try {
+    if (!value) return "";
+    const parsed = new URL(String(value));
+    const direct =
+      parsed.searchParams.get("inviteToken") ||
+      parsed.searchParams.get("inv") ||
+      parsed.searchParams.get("token") ||
+      parsed.searchParams.get("invite");
+    if (direct) return direct;
+
+    const hashQuery = String(parsed.hash || "").split("?")[1] || "";
+    const hashParams = new URLSearchParams(hashQuery);
+    return (
+      hashParams.get("inviteToken") ||
+      hashParams.get("inv") ||
+      hashParams.get("token") ||
+      hashParams.get("invite") ||
+      ""
+    );
+  } catch {
+    return "";
+  }
+}
+
+function getInviteTokenFromRequest(req) {
+  return String(
+    req.body?.inviteToken ||
+    req.body?.inv ||
+    req.query?.inviteToken ||
+    req.query?.inv ||
+    req.query?.token ||
+    req.query?.invite ||
+    req.get("X-Invite-Token") ||
+    tokenFromUrl(req.get("Referer")) ||
+    tokenFromUrl(req.get("Referrer")) ||
+    ""
+  ).trim();
+}
+
+async function requireValidTenantInvite(req, res, next) {
+  try {
+    const token = getInviteTokenFromRequest(req);
+
+    if (!token) {
+      return res.status(401).json({
+        ok: false,
+        message: "Invite token is required for tenant document upload",
+      });
+    }
+
+    const invite = await Invite.findOne({
+      token,
+      usedAt: null,
+      $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
+    }).select("_id").lean();
+
+    if (!invite) {
+      return res.status(401).json({ ok: false, message: "Invalid or expired invite link" });
+    }
+
+    return next();
+  } catch (e) {
+    console.error("tenant upload invite auth error:", e);
+    return res.status(500).json({ ok: false, message: "Unable to verify invite link" });
+  }
+}
+
+function docsUploadAuth(req, res, next) {
+  const referer = String(req.get("Referer") || req.get("Referrer") || "");
+  const isTenantIntake =
+    String(req.body?.source || "") === "tenant-intake" ||
+    referer.includes("tenant-intake");
+
+  if (getInviteTokenFromRequest(req) || isTenantIntake) {
+    return requireValidTenantInvite(req, res, next);
+  }
+
+  return authAdmin(req, res, next);
+}
+
+router.post("/docs", uploadDocuments, docsUploadAuth, async (req, res) => {
   try {
     const canUseImagekit = hasImageKitConfig();
 

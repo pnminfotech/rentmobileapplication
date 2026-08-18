@@ -30,6 +30,7 @@ async function pushAttendanceNotif(tenant, payload = {}) {
     console.log("🔔 pushAttendanceNotif called with payload:", payload); // <-- log outside
 
     await Notification.create({
+      organizationId: tenant.organizationId || null,
       tenantId: tenant._id,
       tenantName: tenant.name,
       roomNo: tenant.roomNo,
@@ -56,6 +57,7 @@ const handleLateRequest = async (req, res, next) => {
 
     // Prevent multiple pending requests
     const pending = await Attendance.findOne({
+      organizationId: req.tenant.organizationId || null,
       tenantId: req.tenant._id,
       status: "pending",
     });
@@ -76,9 +78,9 @@ const handleLateRequest = async (req, res, next) => {
     //   status: "pending",
     // });
 const doc = await Attendance.findOneAndUpdate(
-  { tenantId: req.tenant._id, dateKey: key },
+  { organizationId: req.tenant.organizationId || null, tenantId: req.tenant._id, dateKey: key },
   {
-    $setOnInsert: { tenantId: req.tenant._id, dateKey: key },
+    $setOnInsert: { organizationId: req.tenant.organizationId || null, tenantId: req.tenant._id, dateKey: key },
     $set: {
       scheduledAt,
       lateReason: reason || "",
@@ -117,7 +119,7 @@ const handleCheckIn = async (req, res, next) => {
 
     // Find the latest pending record
     const doc = await Attendance.findOneAndUpdate(
-      { tenantId: req.tenant._id, status: "pending" },
+      { organizationId: req.tenant.organizationId || null, tenantId: req.tenant._id, status: "pending" },
       {
         $set: {
           checkIn: { at: now, where: { lat, lng, accuracy, address } },
@@ -151,7 +153,7 @@ const handleCheckOut = async (req, res, next) => {
     const now = new Date();
 
     const doc = await Attendance.findOneAndUpdate(
-      { tenantId: req.tenant._id, status: "checked_in" },
+      { organizationId: req.tenant.organizationId || null, tenantId: req.tenant._id, status: "checked_in" },
       {
         $set: {
           checkOut: { at: now, where: { lat, lng, accuracy, address } },

@@ -9,6 +9,12 @@ const point = new mongoose.Schema({
 }, { _id: false });
 
 const schema = new mongoose.Schema({
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Organization",
+    default: null,
+    index: true,
+  },
   tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Form", required: true, index: true },
   dateKey: { type: String, required: true, index: true }, // "YYYY-MM-DD"
 
@@ -37,5 +43,6 @@ const schema = new mongoose.Schema({
 // }, { timestamps: true });
 
 schema.index({ tenantId: 1, dateKey: 1 }, { unique: true });
+schema.index({ organizationId: 1, dateKey: 1, status: 1 });
 
 module.exports = mongoose.model("Attendance", schema);

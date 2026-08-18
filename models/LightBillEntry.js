@@ -16,11 +16,38 @@ const mongoose = require("mongoose");
 // module.exports = mongoose.model("LightBillEntry", LightBillEntrySchema);
 
 
-
-
 const LightBillEntrySchema = new mongoose.Schema({
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Organization",
+    default: null,
+    index: true,
+  },
   name: { type: String, required: true }, // e.g., "Meter 101" or "Maushi"
   type: { type: String, enum: ['meter', 'maushi', 'custom'], required: true },
+  billPayer: {
+    type: String,
+    enum: ["tenant", "owner"],
+    default: "tenant",
+    index: true,
+  },
+  billingMode: {
+    type: String,
+    enum: [
+      "owner_only",
+      "tenant_unit_manual",
+      "tenant_unit_meter",
+      "fixed_monthly",
+      "room_meter_split",
+      "included_extra_split",
+      "fixed_per_tenant",
+      "common_meter_split",
+    ],
+    default: "tenant_unit_manual",
+    index: true,
+  },
+  isUnitLinked: { type: Boolean, default: true, index: true },
+  roomId: { type: mongoose.Schema.Types.ObjectId, ref: "Room", default: null },
   propertyType: {
     type: String,
     enum: ["bed", "room", "shop"],
@@ -28,11 +55,23 @@ const LightBillEntrySchema = new mongoose.Schema({
   },
   roomNo: { type: String },
   meterNo: { type: String },
+  previousReading: { type: Number },
   totalReading: { type: Number },
+  consumedUnits: { type: Number },
+  ratePerUnit: { type: Number },
+  fixedCharge: { type: Number },
   amount: { type: Number },
   salary: { type: Number },
   customLabel: { type: String },
   status: { type: String, enum: ['paid', 'pending'], default: 'pending' },
-  date: { type: Date, required: true }
-});
+  date: { type: Date, required: true },
+  createdByName: { type: String, default: "" },
+  updatedByName: { type: String, default: "" },
+}, { timestamps: true });
+
+LightBillEntrySchema.index({ organizationId: 1, date: -1 });
+LightBillEntrySchema.index({ organizationId: 1, name: 1, propertyType: 1, roomNo: 1, date: 1 });
+LightBillEntrySchema.index({ organizationId: 1, billPayer: 1, date: -1 });
+LightBillEntrySchema.index({ organizationId: 1, billingMode: 1, propertyType: 1, date: -1 });
+
 module.exports = mongoose.model("LightBillEntry", LightBillEntrySchema);

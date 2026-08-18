@@ -14,6 +14,7 @@
 const express = require("express");
 const router = express.Router();
 const LeaveRequest = require("../models/LeaveRequest");
+const LeaveNotification = require("../models/LeaveNotification");
 const authTenant = require("../middleware/tenantAuth");
 
 // Create a new leave (Tenant)
@@ -28,9 +29,19 @@ router.post("/", authTenant, async (req, res) => {
   }
 
     const doc = await LeaveRequest.create({
+      organizationId: req.tenant.organizationId || null,
       tenant: req.tenant._id,         // <-- from your middleware
       leaveDate: new Date(when),
     note: String(why).trim(),
+    });
+
+    await LeaveNotification.create({
+      organizationId: req.tenant.organizationId || null,
+      requestId: doc._id,
+      tenant: req.tenant._id,
+      tenantName: req.tenant.name || "",
+      leaveDate: doc.leaveDate,
+      isRead: false,
     });
 
     res.status(201).json(doc);
@@ -43,7 +54,9 @@ router.post("/", authTenant, async (req, res) => {
 // List my leaves (Tenant)
 router.get("/", authTenant, async (req, res) => {
   try {
-    const list = await LeaveRequest.find({ tenant: req.tenant._id })
+    const query = { tenant: req.tenant._id };
+    if (req.tenant.organizationId) query.organizationId = req.tenant.organizationId;
+    const list = await LeaveRequest.find(query)
       .sort({ createdAt: -1 });
     res.json(list);
   } catch (e) {

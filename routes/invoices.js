@@ -7,9 +7,11 @@ const Payment = require('../models/Payment');
 const Form = require('../models/formModels');
 
 const authTenant = require('../middleware/tenantAuth');
-// If you have an admin auth middleware, use it. For now, reuse tenant-safe guard or add your own.
-const authAdmin = require('../middleware/adminAuth') || ((_req,_res,next)=>next()); 
+const authAdmin = require('../middleware/adminAuth');
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { scopedQuery, scopedCreate } = require("../utils/organizationScope");
 
+router.use(attachSystemAuthIfPresent);
 
 
 
@@ -26,24 +28,25 @@ router.post('/admin/invoices/generate', authAdmin, async (req, res) => {
     const dueDate = dayjs(p + '-07').toDate(); // 7th of the month by default
 
     // Active tenants; (customize if you store tenancy state)
-    const tenants = await Form.find({}); // filter state if you add tenancy.state === 'active'
+    const tenants = await Form.find(scopedQuery(req)); // filter state if you add tenancy.state === 'active'
 
     let created = 0, skipped = 0;
     for (const t of tenants) {
       const base = Number(t.baseRent || 0);
       if (!base) { skipped++; continue; }
 
-      const exists = await Invoice.findOne({ tenantId: t._id, period: p });
+      const exists = await Invoice.findOne(scopedQuery(req, { tenantId: t._id, period: p }));
       if (exists) { skipped++; continue; }
 
-      const inv = new Invoice({
+      const inv = new Invoice(scopedCreate(req, {
+        organizationId: t.organizationId || req.organizationId || null,
         tenantId: t._id,
         period: p,
         dueDate,
         amount: base,
         items: [{ label: `Base Rent ${p}`, amount: base }],
         note: `Hostel Rent ${p}`
-      });
+      }));
       await inv.save();
       created++;
     }
@@ -56,21 +59,29 @@ router.post('/admin/invoices/generate', authAdmin, async (req, res) => {
 
 // ---------- TENANT: List my invoices ----------
 router.get('/tenant/invoices', authTenant, async (req, res) => {
-  const list = await Invoice.find({ tenantId: req.tenant._id }).sort({ period: -1, createdAt: -1 });
+  const query = { tenantId: req.tenant._id };
+  if (req.tenant.organizationId) query.organizationId = req.tenant.organizationId;
+  const list = await Invoice.find(query).sort({ period: -1, createdAt: -1 });
   res.json(list);
 });
 
 // ---------- TENANT: Invoice detail ----------
 router.get('/tenant/invoices/:id', authTenant, async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenant._id });
+  const invQuery = { _id: req.params.id, tenantId: req.tenant._id };
+  if (req.tenant.organizationId) invQuery.organizationId = req.tenant.organizationId;
+  const inv = await Invoice.findOne(invQuery);
   if (!inv) return res.status(404).json({ message: 'Not found' });
-  const payments = await Payment.find({ invoiceId: inv._id }).sort({ at: 1 });
+  const paymentQuery = { invoiceId: inv._id };
+  if (req.tenant.organizationId) paymentQuery.organizationId = req.tenant.organizationId;
+  const payments = await Payment.find(paymentQuery).sort({ at: 1 });
   res.json({ invoice: inv, payments });
 });
 
 // ---------- TENANT: UPI Pay intent for an invoice ----------
 router.get('/tenant/pay/:invoiceId/intent', authTenant, async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.invoiceId, tenantId: req.tenant._id });
+  const invQuery = { _id: req.params.invoiceId, tenantId: req.tenant._id };
+  if (req.tenant.organizationId) invQuery.organizationId = req.tenant.organizationId;
+  const inv = await Invoice.findOne(invQuery);
   if (!inv) return res.status(404).send('Invoice not found');
   if (inv.status === 'paid') return res.redirect(`/tenant/invoices/${inv._id}/receipt`);
 
@@ -83,12 +94,15 @@ router.get('/tenant/pay/:invoiceId/intent', authTenant, async (req, res) => {
 // ---------- TENANT: Confirm payment (enter UTR after paying UPI) ----------
 router.post('/tenant/invoices/:id/confirm', authTenant, async (req, res) => {
   const { utr, amount } = req.body;
-  const inv = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenant._id });
+  const invQuery = { _id: req.params.id, tenantId: req.tenant._id };
+  if (req.tenant.organizationId) invQuery.organizationId = req.tenant.organizationId;
+  const inv = await Invoice.findOne(invQuery);
   if (!inv) return res.status(404).json({ message: 'Invoice not found' });
 
   const amt = Number(amount || inv.amount);
   await Payment.create({
-    tenantId: req.tenant._id,
+    organizationId: req.tenant.organizationId || null,
+    tenant: req.tenant._id,
     invoiceId: inv._id,
     amount: amt,
     method: 'UPI',
@@ -104,9 +118,13 @@ router.post('/tenant/invoices/:id/confirm', authTenant, async (req, res) => {
 
 // ---------- TENANT: Simple HTML receipt ----------
 router.get('/tenant/invoices/:id/receipt', authTenant, async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, tenantId: req.tenant._id });
+  const invQuery = { _id: req.params.id, tenantId: req.tenant._id };
+  if (req.tenant.organizationId) invQuery.organizationId = req.tenant.organizationId;
+  const inv = await Invoice.findOne(invQuery);
   if (!inv) return res.status(404).send('Invoice not found');
-  const payments = await Payment.find({ invoiceId: inv._id }).sort({ at: 1 });
+  const paymentQuery = { invoiceId: inv._id };
+  if (req.tenant.organizationId) paymentQuery.organizationId = req.tenant.organizationId;
+  const payments = await Payment.find(paymentQuery).sort({ at: 1 });
   if (inv.status !== 'paid' || !payments.length) return res.status(400).send('Not paid yet');
 
   const t = req.tenant;
@@ -175,10 +193,19 @@ router.get('/tenant/invoices/:id/receipt', authTenant, async (req, res) => {
 // ---------- ADMIN: Record offline payment (cash/bank) ----------
 router.post('/admin/payments/record', authAdmin, async (req, res) => {
   const { tenantId, invoiceId, amount, method='Cash', utr, at } = req.body;
-  const inv = await Invoice.findOne({ _id: invoiceId, tenantId });
+  const inv = await Invoice.findOne(scopedQuery(req, { _id: invoiceId, tenantId }));
   if (!inv) return res.status(404).json({ message: 'Invoice not found' });
 
-  await Payment.create({ tenantId, invoiceId, amount, method, utr, at: at ? new Date(at) : new Date() });
+  await Payment.create({
+    organizationId: inv.organizationId || req.organizationId || null,
+    tenant: tenantId,
+    invoiceId,
+    amount,
+    method,
+    utr,
+    at: at ? new Date(at) : new Date(),
+    status: 'confirmed',
+  });
   inv.status = 'paid'; inv.lastPaidAt = new Date(); await inv.save();
 
   res.json({ ok: true });

@@ -86,10 +86,22 @@ const mongoose = require("mongoose");
 
 const formSchema = new mongoose.Schema(
   {
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true,
+    },
     srNo: { type: Number, unique: true, required: true },
 
     name: { type: String, required: true },
     joiningDate: { type: Date, required: true },
+    propertyType: {
+      type: String,
+      enum: ["bed", "room", "shop"],
+      default: "bed",
+      index: true,
+    },
     category: { type: String },
     roomId: { type: String },
     roomNo: { type: String },
@@ -102,8 +114,15 @@ const formSchema = new mongoose.Schema(
     state: { type: String },
     houseNo: { type: String },
     nearbyPlace: { type: String },
+    relativeAddress1: { type: String },
 
     phoneNo: { type: Number, required: true },
+    intakeStatus: {
+      type: String,
+      enum: ["submitted", "pending_tenant"],
+      default: "submitted",
+      index: true,
+    },
 
     // ⛔ removed address text fields for relatives as per your request
     // relativeAddress1: { type: String },
@@ -128,6 +147,22 @@ const formSchema = new mongoose.Schema(
 
     floorNo: { type: String },
     bedNo: { type: String },
+    familyMembers: { type: Number, default: 0 },
+    hasCanteen: { type: Boolean, default: false },
+    canteenPlanType: {
+      type: String,
+      enum: ["", "full_package", "per_meal", "meal_package"],
+      default: "",
+    },
+    canteenStartDate: { type: Date },
+    canteenMonthlyAmount: { type: Number, default: 0 },
+    canteenIncludedMeals: {
+      type: [String],
+      enum: ["breakfast", "lunch", "dinner"],
+      default: [],
+    },
+    shopName: { type: String },
+    shopBusiness: { type: String },
     companyAddress: { type: String },
     dateOfJoiningCollege: { type: Date,  },
     dob: { type: Date },
@@ -161,6 +196,9 @@ firstRentMonth: { type: String }, // e.g. "Jan-26"
     rents: [
       {
         rentAmount: { type: Number, required: true },
+        canteenAmount: { type: Number, default: 0 },
+        lightBillAmount: { type: Number, default: 0 },
+        totalAmount: { type: Number, default: 0 },
         date: { type: Date, required: true }, // payment date
         month: { type: String, required: true }, // "Dec-25"
         paymentMode: {
@@ -169,10 +207,45 @@ firstRentMonth: { type: String }, // e.g. "Jan-26"
           // default: "Cash",
           required: true,
         },
-        default: [],
+        utr: { type: String, default: "" },
+        note: { type: String, default: "" },
+        receiptUrl: { type: String, default: "" },
+        payments: {
+          type: [
+            {
+              amount: { type: Number, required: true },
+              rentAmount: { type: Number, default: 0 },
+              canteenAmount: { type: Number, default: 0 },
+              lightBillAmount: { type: Number, default: 0 },
+              extraAmount: { type: Number, default: 0 },
+              date: { type: Date, required: true },
+              paymentMode: {
+                type: String,
+                enum: ["Cash", "Online"],
+                required: true,
+              },
+              utr: { type: String, default: "" },
+              note: { type: String, default: "" },
+              receiptUrl: { type: String, default: "" },
+            },
+          ],
+          default: [],
+        },
       },
-      
     ],
+
+    paymentAudit: {
+      type: [
+        {
+          action: { type: String, default: "edit" },
+          changedAt: { type: Date, default: Date.now },
+          changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "SystemUser", default: null },
+          previous: { type: mongoose.Schema.Types.Mixed },
+          next: { type: mongoose.Schema.Types.Mixed },
+        },
+      ],
+      default: [],
+    },
 
     leaveDate: { type: String },
     leaveSettlement: {
@@ -225,4 +298,7 @@ firstRentMonth: { type: String }, // e.g. "Jan-26"
   { timestamps: true }
 );
 
-module.exports = mongoose.model("Form", formSchema);
+formSchema.index({ organizationId: 1, roomNo: 1, bedNo: 1, leaveDate: 1 });
+formSchema.index({ organizationId: 1, createdAt: -1 });
+
+module.exports = mongoose.models.Form || mongoose.model("Form", formSchema);

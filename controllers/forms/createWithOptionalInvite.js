@@ -142,6 +142,7 @@ const mongoose = require("mongoose");
 const Invite = require("../../models/Invite");
 const Form = require("../../models/formModels");
 const { getCurrentMonthlyRent } = require("../../routes/_helpers/rentHistory");
+const { scopedQuery, scopedCreate } = require("../../utils/organizationScope");
 
 // Re-use central SrNo helper from formController
 const {
@@ -149,18 +150,20 @@ const {
 } = require("../formController");
 
 // Always assign SrNo on server using shared helper
-async function createFormWithSrNo(rest, session) {
+async function createFormWithSrNo(req, rest, session) {
   const payload = { ...rest };
   delete payload.srNo;
 
   const nextSr = await assignNextSrNoAndUpdateCounter();
   payload.srNo = Number(nextSr);
 
+  const scopedPayload = scopedCreate(req, payload);
+
   if (session) {
-    const [doc] = await Form.create([payload], { session });
+    const [doc] = await Form.create([scopedPayload], { session });
     return doc;
   }
-  return await Form.create(payload);
+  return await Form.create(scopedPayload);
 }
 
 function parseLeaveDate(value) {
@@ -193,7 +196,7 @@ function isActiveBedTenant(tenant, category) {
   return leaveDate > today;
 }
 
-async function assertBedIsVacant(rest, excludeTenantId) {
+async function assertBedIsVacant(req, rest, excludeTenantId) {
   const roomId = String(rest?.roomId || "").trim();
   const roomNo = String(rest?.roomNo || "").trim();
   const bedNo = String(rest?.bedNo || "").trim();
@@ -201,11 +204,11 @@ async function assertBedIsVacant(rest, excludeTenantId) {
 
   const category = String(rest?.category || "").trim();
   const roomFilter = roomId ? { roomId } : { roomNo };
-  const candidates = await Form.find({
+  const candidates = await Form.find(scopedQuery(req, {
     ...roomFilter,
     bedNo,
     ...(excludeTenantId ? { _id: { $ne: excludeTenantId } } : {}),
-  })
+  }))
     .select("_id name category leaveDate")
     .lean();
   const occupied = candidates.find((tenant) => isActiveBedTenant(tenant, category));
@@ -219,8 +222,34 @@ async function assertBedIsVacant(rest, excludeTenantId) {
   }
 }
 
+async function updateDraftFromInvite(req, invite, rest, session) {
+  if (!invite?.usedByFormId) {
+    const e = new Error("Draft form missing");
+    e.http = 400;
+    throw e;
+  }
+
+  const update = { ...rest, intakeStatus: "submitted" };
+  delete update.srNo;
+  // Invite creation may already have recorded advance rent on the draft.
+  // Submitting the intake form should complete the draft, not reset payment rows.
+  delete update.rents;
+
+  const query = scopedQuery(req, { _id: invite.usedByFormId });
+  const options = { new: true };
+  if (session) options.session = session;
+
+  const doc = await Form.findOneAndUpdate(query, { $set: update }, options);
+  if (!doc) {
+    const e = new Error("Tenant draft not found");
+    e.http = 404;
+    throw e;
+  }
+  return doc;
+}
+
 // Fallback flow when transactions are not supported
-const plainSingleUseFlow = async (inviteToken, rest) => {
+const plainSingleUseFlow = async (req, inviteToken, rest) => {
   const now = new Date();
 
   const invite = await Invite.findOneAndUpdate(
@@ -239,13 +268,8 @@ const plainSingleUseFlow = async (inviteToken, rest) => {
     throw e;
   }
 
-  await assertBedIsVacant(rest, invite.usedByFormId);
-  const doc = await createFormWithSrNo(rest, null);
-
-  await Invite.updateOne(
-    { _id: invite._id },
-    { $set: { usedByFormId: doc._id } }
-  );
+  await assertBedIsVacant(req, rest, invite.usedByFormId);
+  const doc = await updateDraftFromInvite(req, invite, rest, null);
 
   return doc;
 };
@@ -253,6 +277,15 @@ const plainSingleUseFlow = async (inviteToken, rest) => {
 async function createWithOptionalInvite(req, res) {
   const session = await mongoose.startSession();
   const { inviteToken, ...rest } = req.body;
+  const propertyType = normalizePropertyType(rest.propertyType);
+  rest.propertyType = propertyType;
+  rest.hasCanteen = propertyType === "bed" && req.organization?.features?.canteenEnabled && (rest.hasCanteen === true || String(rest.hasCanteen || "").toLowerCase() === "true");
+  if (!rest.hasCanteen) {
+    rest.canteenPlanType = "";
+    rest.canteenMonthlyAmount = 0;
+    rest.canteenIncludedMeals = [];
+    delete rest.canteenStartDate;
+  }
 
   /* ---------------------------------------------------------
      ✅ FIX 1: STORE monthly rent into baseRent (BEFORE deleting)
@@ -290,8 +323,8 @@ async function createWithOptionalInvite(req, res) {
   // No invite token → normal create
   if (!inviteToken) {
     try {
-      await assertBedIsVacant(rest);
-      const saved = await createFormWithSrNo(rest, null);
+      await assertBedIsVacant(req, rest);
+      const saved = await createFormWithSrNo(req, rest, null);
       return res.status(201).json(saved);
     } catch (err) {
       console.error("create form (no invite) error:", err);
@@ -332,14 +365,8 @@ async function createWithOptionalInvite(req, res) {
         }
 
         // 🟢 rents already sanitized above
-        await assertBedIsVacant(rest, invite.usedByFormId);
-        const doc = await createFormWithSrNo(rest, session);
-
-        await Invite.updateOne(
-          { _id: invite._id },
-          { $set: { usedByFormId: doc._id } },
-          { session }
-        );
+        await assertBedIsVacant(req, rest, invite.usedByFormId);
+        const doc = await updateDraftFromInvite(req, invite, rest, session);
 
         created = doc;
       });
@@ -352,7 +379,7 @@ async function createWithOptionalInvite(req, res) {
 
       if (noTx) {
         console.warn("[invites] Falling back to non-transaction flow:", msg);
-        created = await plainSingleUseFlow(inviteToken, rest);
+        created = await plainSingleUseFlow(req, inviteToken, rest);
       } else {
         throw txErr;
       }

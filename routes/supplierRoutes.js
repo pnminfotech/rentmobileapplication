@@ -1,11 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-// const { suppliersDB } = require("../config/mainte"); // Import the connection
-// const SupplierSchema = require("../models/Supplier");
-// const Supplier = suppliersDB.model("Supplier", SupplierSchema);
 const Supplier = require("../models/Supplier");
 const Project = require("../models/Project");
+const authAdmin = require("../middleware/adminAuth");
+
+router.use(authAdmin);
 
 //to fetch the supplier.
 router.get("/", async (req, res) => {

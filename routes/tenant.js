@@ -717,7 +717,9 @@ router.get('/upi-intent', (req, res) => {
 /* PAYMENTS                                                            */
 /* ------------------------------------------------------------------ */
 router.get('/payments/my', authTenant, async (req, res) => {
-  const list = await Payment.find({ tenant: req.tenant._id }).sort({ createdAt: -1 });
+  const query = { tenant: req.tenant._id };
+  if (req.tenant.organizationId) query.organizationId = req.tenant.organizationId;
+  const list = await Payment.find(query).sort({ createdAt: -1 });
   res.json(list);
 });
 
@@ -726,6 +728,7 @@ router.post('/payments/report', authTenant, async (req, res) => {
   if (!amount) return res.status(400).json({ message: 'amount required' });
 
   const p = await Payment.create({
+    organizationId: req.tenant.organizationId || null,
     tenant: req.tenant._id,
     amount: Number(amount),
     utr: (utr || '').trim(),
@@ -739,6 +742,7 @@ router.post('/payments/report', authTenant, async (req, res) => {
   try {
     const PaymentNotification = require('../models/PaymentNotification');
     const payload = {
+      organizationId: req.tenant.organizationId || null,
       tenantId: req.tenant._id,
       paymentId: p._id,
       amount: p.amount,

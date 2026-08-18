@@ -7,13 +7,22 @@ const router = express.Router();
 
 const Form = require("../models/formModels");
 const Counter = require("../models/counterModel");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { scopedQuery, scopedCreate } = require("../utils/organizationScope");
 const { normalizeFirstRentCycle } = require("./_helpers/firstRentCycle");
+
+const Organization = require("../models/Organization");
+const { sendAdmissionSms } = require("../services/smsService");
 const {
   appendRentHistorySnapshot,
   getCurrentMonthlyRent,
 } = require("./_helpers/rentHistory");
 
 const ImageKit = require("imagekit");
+
+router.use(attachSystemAuthIfPresent);
+router.use(authAdmin);
 
 function hasImageKitConfig() {
   return (
@@ -33,7 +42,11 @@ function getImageKit() {
   });
 }
 
-const upload = multer({ storage: multer.memoryStorage() });
+const MAX_IMAGE_UPLOAD_SIZE = 2 * 1024 * 1024;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_IMAGE_UPLOAD_SIZE, files: 10 },
+});
 const TARGET = 300 * 1024; // 300 KB target for faster uploads
 const MIN_WIDTH = 1200; // keep text readable for IDs
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
@@ -126,6 +139,21 @@ function isActiveBedTenant(tenant, category) {
   return leaveDate > today;
 }
 
+function normalizePropertyType(value) {
+  return ["room", "shop"].includes(String(value || "").toLowerCase())
+    ? String(value).toLowerCase()
+    : "bed";
+}
+
+function toBool(value) {
+  return value === true || String(value || "").toLowerCase() === "true";
+}
+
+function toMealList(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(raw.map((meal) => String(meal || "").trim().toLowerCase()).filter((meal) => ["breakfast", "lunch", "dinner"].includes(meal)))];
+}
+
 router.post("/forms-with-docs", upload.array("documents", 10), async (req, res) => {
   try {
     const body = req.body || {};
@@ -161,9 +189,12 @@ const firstRentMonth = String(body.firstRentMonth || rentMonth).trim();
 
     const imagekit = getImageKit();
 
+    const propertyType = normalizePropertyType(body.propertyType);
+    const hasCanteen = propertyType === "bed" && req.organization?.features?.canteenEnabled ? toBool(body.hasCanteen) : false;
     const formPayload = {
       name: body.name,
       joiningDate,
+      propertyType,
       roomId: body.roomId ? String(body.roomId).trim() : undefined,
       roomNo: body.roomNo,
       depositAmount: toNum(body.depositAmount),
@@ -176,6 +207,14 @@ const firstRentMonth = String(body.firstRentMonth || rentMonth).trim();
       phoneNo: body.phoneNo ? String(body.phoneNo).trim() : "", // ✅ string
       floorNo: body.floorNo,
       bedNo: body.bedNo,
+      familyMembers: toNum(body.familyMembers),
+      hasCanteen,
+      canteenPlanType: hasCanteen ? body.canteenPlanType || "" : "",
+      canteenStartDate: hasCanteen ? toDate(body.canteenStartDate) : undefined,
+      canteenMonthlyAmount: hasCanteen ? toNum(body.canteenMonthlyAmount) : 0,
+      canteenIncludedMeals: hasCanteen ? toMealList(body.canteenIncludedMeals) : [],
+      shopName: body.shopName,
+      shopBusiness: body.shopBusiness,
       companyAddress: body.companyAddress,
       dateOfJoiningCollege: toDate(body.dateOfJoiningCollege),
       dob: toDate(body.dob),
@@ -201,11 +240,11 @@ firstRentMonth: body.firstRentMonth,
     const selectedBedNo = String(formPayload.bedNo || "").trim();
     if ((selectedRoomId || selectedRoomNo) && selectedBedNo) {
       const roomFilter = selectedRoomId ? { roomId: selectedRoomId } : { roomNo: selectedRoomNo };
-      const bedCandidates = await Form.find({
+      const bedCandidates = await Form.find(scopedQuery(req, {
         ...roomFilter,
         bedNo: selectedBedNo,
         ...(formId ? { _id: { $ne: formId } } : {}),
-      })
+      }))
         .select("_id name category leaveDate")
         .lean();
       const occupied = bedCandidates.find((tenant) =>
@@ -275,7 +314,7 @@ firstRentMonth: body.firstRentMonth,
 
     // ✅ Update existing draft
     if (formId) {
-      const existing = await Form.findById(formId);
+      const existing = await Form.findOne(scopedQuery(req, { _id: formId }));
       if (!existing) {
         return res.status(404).json({ ok: false, message: "Draft form not found" });
       }
@@ -334,7 +373,7 @@ firstRentMonth: body.firstRentMonth,
     ? [{ rentAmount: currentRentAmount, date: joiningDate || new Date(), month: firstRentMonth, paymentMode }]
     : [];
 
-const created = await Form.create({
+const created = await Form.create(scopedCreate(req, {
   srNo,
   ...formPayload,
   firstRentStatus,
@@ -353,9 +392,15 @@ const created = await Form.create({
     : [],
   rents,
   documents: docs,
-});
+}));
 
+const organization = created.organizationId
+  ? await Organization.findById(created.organizationId).lean()
+  : null;
 
+sendAdmissionSms(created, organization || {}).catch((err) =>
+  console.error("Admission SMS failed:", err.message)
+);
     return res.status(201).json({ ok: true, form: created, mode: "created", imagekit: true });
   } catch (e) {
     console.error("forms-with-docs error:", e);

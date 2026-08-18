@@ -6,8 +6,13 @@ const ImageKit = require("imagekit");
 
 const Form = require("../models/Form"); // ✅ confirm correct model path
 const Invite = require("../models/Invite");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { scopedQuery, scopedCreate, scopedUpdate } = require("../utils/organizationScope");
 
 const router = express.Router();
+
+router.use(attachSystemAuthIfPresent);
 
 /* ================== ImageKit ================== */
 function hasImageKitConfig() {
@@ -29,7 +34,11 @@ function getImageKit() {
 }
 
 /* ================== Multer (memory) ================== */
-const upload = multer({ storage: multer.memoryStorage() });
+const MAX_IMAGE_UPLOAD_SIZE = 2 * 1024 * 1024;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_IMAGE_UPLOAD_SIZE, files: 3 },
+});
 
 /* ================== Helpers ================== */
 const TARGET = 10 * 1024; // 10 KB (your choice)
@@ -121,6 +130,11 @@ function buildPatch(body) {
   return patch;
 }
 
+function requireInviteOrAdmin(req, res, next) {
+  if (req.body?.inv) return next();
+  return authAdmin(req, res, next);
+}
+
 /* ================== Route ================== */
 router.post(
   "/with-docs",
@@ -129,6 +143,7 @@ router.post(
     { name: "parentAadhar", maxCount: 1 },
     { name: "photo", maxCount: 1 },
   ]),
+  requireInviteOrAdmin,
   async (req, res) => {
     try {
       console.log("REQ BODY:", req.body);
@@ -246,16 +261,18 @@ router.post(
 
       // ✅ UPDATE
       if (formId && formId !== "undefined") {
-        savedForm = await Form.findByIdAndUpdate(
-          formId,
-          {
-            $set: updateData,
-            ...(docsToAdd.length ? { $push: { documents: { $each: docsToAdd } } } : {}),
-          },
-          { new: true, runValidators: true }
-        );
-
+        savedForm = await Form.findOne(scopedQuery(req, { _id: formId }));
         if (!savedForm) return res.status(404).json({ message: "Form not found" });
+
+        Object.assign(savedForm, scopedUpdate(req, updateData));
+        if (docsToAdd.length) {
+          const replacedRelations = new Set(docsToAdd.map((document) => document.relation));
+          const retainedDocuments = (savedForm.documents || []).filter(
+            (document) => !replacedRelations.has(document.relation)
+          );
+          savedForm.documents = [...retainedDocuments, ...docsToAdd];
+        }
+        await savedForm.save({ validateModifiedOnly: true });
 
         if (inv) {
           await Invite.updateOne(
@@ -273,14 +290,14 @@ router.post(
       }
 
       // ✅ CREATE (admin direct)
-      const lastForm = await Form.findOne().sort({ srNo: -1 });
+      const lastForm = await Form.findOne(scopedQuery(req)).sort({ srNo: -1 });
       const srNo = lastForm ? lastForm.srNo + 1 : 1;
 
-      savedForm = await Form.create({
+      savedForm = await Form.create(scopedCreate(req, {
         ...updateData,
         srNo,
         documents: docsToAdd,
-      });
+      }));
 
       return res.status(201).json({
         message: "Form saved successfully",

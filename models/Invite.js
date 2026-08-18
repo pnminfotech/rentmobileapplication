@@ -40,17 +40,23 @@ const InviteSchema = new mongoose.Schema(
   {
     token: { type: String, unique: true, index: true, required: true },
 
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true,
+    },
+
     // Prefilled fields (optional)
     prefill: { type: mongoose.Schema.Types.Mixed, default: {} },
 
     usedAt: { type: Date, default: null },
     usedByFormId: { type: mongoose.Schema.Types.ObjectId, ref: "Form" },
 
-    // No expiry by default (link valid until used)
     expiresAt: {
       type: Date,
-      default: null,
-      required: false,
+      default: () => new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
+      required: true,
     },
   },
   { timestamps: true }

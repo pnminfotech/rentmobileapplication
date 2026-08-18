@@ -1,7 +1,14 @@
 const express = require("express");
 const router = express.Router();
-const { khataBookDB } = require("../config/khataDB");
-const Maintenance = khataBookDB.model("Maintainance", require("../models/Maintainance"));
+const mongoose = require("mongoose");
+const MaintenanceSchema = require("../models/Maintainance");
+const authAdmin = require("../middleware/adminAuth");
+
+const Maintenance =
+  mongoose.models.Maintainance || mongoose.model("Maintainance", MaintenanceSchema);
+
+router.use(authAdmin);
+
 // Create a new schema
 router.post("/create", async (req, res) => {
     try {

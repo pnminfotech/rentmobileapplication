@@ -257,14 +257,56 @@
 
 // controllers/invites.js
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const Invite = require("../models/Invite");
 const Form = require("../models/formModels");
 const Counter = require("../models/counterModel"); // ✅ same counter you already use
+const Room = require("../models/Room");
+const { scopedCreate, scopedQuery } = require("../utils/organizationScope");
+
+const INVITE_VALIDITY_MS = 10 * 24 * 60 * 60 * 1000;
 
 const MONTHS = [
   "Jan","Feb","Mar","Apr","May","Jun",
   "Jul","Aug","Sep","Oct","Nov","Dec",
 ];
+
+function normalizePropertyType(value) {
+  return ["room", "shop"].includes(String(value || "").toLowerCase())
+    ? String(value).toLowerCase()
+    : "bed";
+}
+
+function propertyTypeFromAllocation(data = {}) {
+  const explicit = normalizePropertyType(data.propertyType);
+  if (explicit !== "bed") return explicit;
+
+  const bedNo = String(data.bedNo || "").toUpperCase();
+  if (bedNo === "SHOP-1") return "shop";
+  if (bedNo === "ROOM-1") return "room";
+
+  return "bed";
+}
+
+async function inferInvitePropertyType(data = {}, organizationId) {
+  const direct = propertyTypeFromAllocation(data);
+  if (direct !== "bed") return direct;
+
+  const roomId = String(data.roomId || "").trim();
+  const roomNo = String(data.roomNo || "").trim();
+  const scope = organizationId ? { organizationId } : {};
+  const query = roomId && mongoose.Types.ObjectId.isValid(roomId)
+    ? { _id: roomId, ...scope }
+    : roomNo
+    ? { roomNo, ...scope }
+    : null;
+
+  if (!query) return "bed";
+
+  const room = await Room.findOne(query).select("propertyType").lean();
+  return normalizePropertyType(room?.propertyType);
+}
+
 function getTenantIntakePath() {
   const rawBase = String(
     process.env.PUBLIC_URL ||
@@ -279,6 +321,53 @@ function getTenantIntakePath() {
       : "";
 
   return `${basePath}/tenant-intake`;
+}
+
+function getTenantIntakeUrl(req) {
+  const configured = String(process.env.TENANT_FORM_BASE_URL || "").trim();
+  if (configured) {
+    const withProtocol = /^[a-z][a-z\d+\-.]*:\/\//i.test(configured)
+      ? configured
+      : `https://${configured.replace(/^\/+/, "")}`;
+    const safeConfigured = withProtocol.replace(
+      /^(https?:\/\/[^/:]+):\d+:(\d+)(?=\/|$)/i,
+      "$1:$2"
+    );
+    const url = new URL(safeConfigured);
+    if (!url.pathname || url.pathname === "/") url.pathname = getTenantIntakePath();
+    return url;
+  }
+
+  const origin = req.get("X-Origin") || req.get("Origin") || `${req.protocol}://${req.get("host")}`;
+  return new URL(getTenantIntakePath(), origin);
+}
+
+function buildInviteUrl(req, token, data) {
+  const url = getTenantIntakeUrl(req);
+  url.searchParams.set("tenant", "true");
+  url.searchParams.set("lock", "1");
+  url.searchParams.set("inv", token);
+  if (data.name) url.searchParams.set("name", String(data.name));
+  if (data.phoneNo) url.searchParams.set("phoneNo", String(data.phoneNo));
+  if (data.category) url.searchParams.set("category", data.category);
+  if (data.propertyType) url.searchParams.set("propertyType", data.propertyType);
+  if (data.roomNo) url.searchParams.set("roomNo", data.roomNo);
+  if (data.bedNo) url.searchParams.set("bedNo", data.bedNo);
+  if (data.joiningDate) url.searchParams.set("joiningDate", String(data.joiningDate));
+  if (data.monthlyRent != null) {
+    url.searchParams.set("baseRent", String(data.monthlyRent));
+    url.searchParams.set("rentAmount", String(data.monthlyRent));
+  }
+  if (data.depositAmount != null) url.searchParams.set("depositAmount", String(data.depositAmount));
+  if (data.firstRentStatus) url.searchParams.set("firstRentStatus", data.firstRentStatus);
+  if (data.firstRentMonth) url.searchParams.set("firstRentMonth", data.firstRentMonth);
+  if (data.paymentMode) url.searchParams.set("paymentMode", data.paymentMode);
+  if (data.hasCanteen !== undefined) url.searchParams.set("hasCanteen", String(data.hasCanteen));
+  if (data.canteenPlanType) url.searchParams.set("canteenPlanType", data.canteenPlanType);
+  if (data.canteenStartDate) url.searchParams.set("canteenStartDate", String(data.canteenStartDate));
+  if (data.canteenMonthlyAmount != null) url.searchParams.set("canteenMonthlyAmount", String(data.canteenMonthlyAmount));
+  if (Array.isArray(data.canteenIncludedMeals)) url.searchParams.set("canteenIncludedMeals", data.canteenIncludedMeals.join(","));
+  return url.toString();
 }
 
 function fmtMonthKey(y, m) {
@@ -349,6 +438,7 @@ exports.createInvite = async (req, res) => {
     const prefill = req.body || {};
     const toDate = (v) => (v ? new Date(v) : undefined);
     const toStr = (v) => (v === "" || v == null ? undefined : String(v));
+    const toBool = (v) => v === true || String(v || "").toLowerCase() === "true";
     const toNumOrFallback = (...vals) => {
       for (const v of vals) {
         if (v === "" || v == null) continue;
@@ -362,16 +452,29 @@ exports.createInvite = async (req, res) => {
     const category = String(prefill.category || "").trim();
     const roomNo = String(prefill.roomNo || "").trim();
     const bedNo = String(prefill.bedNo || "").trim();
+    const propertyType = await inferInvitePropertyType(prefill, req.organizationId);
+    const hasCanteen = propertyType === "bed" && req.organization?.features?.canteenEnabled && toBool(prefill.hasCanteen);
+    const canteenPlanType = hasCanteen ? String(prefill.canteenPlanType || "").trim() : "";
+    const canteenStartDate = hasCanteen ? (prefill.canteenStartDate || prefill.joiningDate) : undefined;
+    const canteenMonthlyAmount = hasCanteen ? Number(prefill.canteenMonthlyAmount || 0) : 0;
+    const canteenIncludedMeals = hasCanteen && Array.isArray(prefill.canteenIncludedMeals) ? prefill.canteenIncludedMeals : [];
 
     const name = String(prefill.name || "").trim();
     const joiningDate = prefill.joiningDate;
+    const parsedJoiningDate = new Date(joiningDate);
 
     if (!category) return res.status(400).json({ ok: false, message: "Category is required" });
     if (!roomNo) return res.status(400).json({ ok: false, message: "Room No is required" });
     if (!bedNo) return res.status(400).json({ ok: false, message: "Bed No is required" });
 
     if (!name) return res.status(400).json({ ok: false, message: "Name is required" });
-    if (!joiningDate) return res.status(400).json({ ok: false, message: "Joining Date is required" });
+    if (!joiningDate || Number.isNaN(parsedJoiningDate.getTime())) {
+      return res.status(400).json({ ok: false, message: "Valid joining date is required" });
+    }
+    const phoneNo = String(prefill.phoneNo || "").replace(/\D/g, "").slice(0, 10);
+    if (!/^\d{10}$/.test(phoneNo)) {
+      return res.status(400).json({ ok: false, message: "Valid 10-digit mobile number is required" });
+    }
 
     const monthlyRent = toNumOrFallback(prefill.baseRent, prefill.rentAmount);
     if (!Number.isFinite(monthlyRent) || monthlyRent <= 0) {
@@ -379,19 +482,118 @@ exports.createInvite = async (req, res) => {
     }
 
     const dep = Number(prefill.depositAmount ?? 0);
+    if (!Number.isFinite(dep) || dep < 0) {
+      return res.status(400).json({ ok: false, message: "Valid deposit amount is required" });
+    }
 
-    const firstRentStatus = String(prefill.firstRentStatus || "NOT_PAID").trim();
+    const firstRentStatus = ["ADVANCE_PAID", "NOT_PAID"].includes(String(prefill.firstRentStatus || "").trim())
+      ? String(prefill.firstRentStatus).trim()
+      : "NOT_PAID";
+    const paymentMode = ["Cash", "Online"].includes(String(prefill.paymentMode || "").trim())
+      ? String(prefill.paymentMode).trim()
+      : "Cash";
     const jd = new Date(joiningDate);
     const firstRentMonth =
       firstRentStatus === "ADVANCE_PAID"
         ? fmtMonthKey(jd.getFullYear(), jd.getMonth())
         : fmtMonthKey(jd.getFullYear(), jd.getMonth() + 1);
+    const inviteUrlData = {
+      name,
+      phoneNo,
+      category,
+      propertyType,
+      roomNo,
+      bedNo,
+      joiningDate,
+      monthlyRent,
+      depositAmount: dep,
+      firstRentStatus,
+      firstRentMonth,
+      paymentMode,
+      hasCanteen,
+      canteenPlanType,
+      canteenStartDate,
+      canteenMonthlyAmount,
+      canteenIncludedMeals,
+    };
+
+    // Build/validate URL before writing anything, so a bad URL config cannot
+    // reserve the bed and then return an error to the app.
+    const previewUrl = buildInviteUrl(req, token, inviteUrlData);
 
     // ✅ Optional: pre-check bed occupancy (faster error)
-    const bedCandidates = await Form.find({ roomNo, bedNo })
-      .select("_id name category leaveDate")
+    const bedCandidates = await Form.find(scopedQuery(req, { roomNo, bedNo }))
+      .select("_id name category leaveDate intakeStatus phoneNo srNo")
       .lean();
     const existing = bedCandidates.find((tenant) => isActiveBedTenant(tenant, category));
+    if (existing?.intakeStatus === "pending_tenant") {
+      const samePhone = String(existing.phoneNo || "").replace(/\D/g, "").slice(0, 10) === phoneNo;
+      if (!samePhone) {
+        return res.status(409).json({
+          ok: false,
+          message: `Bed already has a pending invite for "${existing.name || "tenant"}": Category "${category}", Room "${roomNo}", Bed "${bedNo}".`,
+        });
+      }
+
+      const existingInvite = await Invite.findOne(scopedQuery(req, {
+        usedByFormId: existing._id,
+        usedAt: null,
+        expiresAt: { $gt: new Date() },
+      })).sort({ createdAt: -1 });
+
+      if (existingInvite) {
+        return res.json({
+          ok: true,
+          reused: true,
+          token: existingInvite.token,
+          url: buildInviteUrl(req, existingInvite.token, inviteUrlData),
+          inviteId: existingInvite._id,
+          formId: existing._id,
+          srNo: existing.srNo,
+          expiresAt: existingInvite.expiresAt,
+        });
+      }
+
+      const replacementInvite = await Invite.create({
+        token,
+        prefill: {
+          ...prefill,
+          category,
+          propertyType,
+          roomNo,
+          bedNo,
+          name,
+          phoneNo,
+          rentAmount: monthlyRent,
+          baseRent: monthlyRent,
+          depositAmount: dep,
+          srNo: existing.srNo,
+          firstRentStatus,
+          firstRentMonth,
+          paymentMode,
+          hasCanteen,
+          canteenPlanType,
+          canteenStartDate,
+          canteenMonthlyAmount,
+          canteenIncludedMeals,
+        },
+        usedByFormId: existing._id,
+        usedAt: null,
+        organizationId: req.organizationId || null,
+        expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
+      });
+
+      return res.json({
+        ok: true,
+        reused: true,
+        token,
+        url: previewUrl,
+        inviteId: replacementInvite._id,
+        formId: existing._id,
+        srNo: existing.srNo,
+        expiresAt: replacementInvite.expiresAt,
+      });
+    }
     if (existing) {
       return res.status(409).json({
         ok: false,
@@ -411,20 +613,21 @@ exports.createInvite = async (req, res) => {
                 rentAmount: monthlyRent,
                 date: new Date(joiningDate),
                 month: firstRentMonth,
-                paymentMode: "Cash",
+                paymentMode,
               },
             ]
           : [];
 
-      createdForm = await Form.create({
+      createdForm = await Form.create(scopedCreate(req, {
         srNo,
         category,          // ✅ IMPORTANT (fix null category)
+        propertyType,
+        roomId: toStr(prefill.roomId),
+        floorNo: toStr(prefill.floorNo),
         roomNo,
         bedNo,
         name,
-        phoneNo: prefill.phoneNo
-          ? String(prefill.phoneNo).replace(/\D/g, "").slice(0, 10)
-          : undefined,
+        phoneNo,
         address: toStr(prefill.address),
         pincode: prefill.pincode || undefined,
         city: prefill.city || undefined,
@@ -437,21 +640,31 @@ exports.createInvite = async (req, res) => {
         relative2Relation: prefill.relative2Relation || undefined,
         relative2Name: prefill.relative2Name || undefined,
         relative2Phone: prefill.relative2Phone || undefined,
+        familyMembers: toNumOrFallback(prefill.familyMembers, 0),
+        shopName: toStr(prefill.shopName),
+        shopBusiness: toStr(prefill.shopBusiness),
         companyAddress: toStr(prefill.companyAddress),
         dateOfJoiningCollege: toDate(prefill.dateOfJoiningCollege),
         dob: toDate(prefill.dob),
+        hasCanteen,
+        canteenPlanType,
+        canteenStartDate: toDate(canteenStartDate),
+        canteenMonthlyAmount,
+        canteenIncludedMeals,
         joiningDate: new Date(joiningDate),
         depositAmount: dep,
         baseRent: monthlyRent,
         rentAmount: monthlyRent,
         firstRentStatus,
         firstRentMonth,
+        paymentMode,
+        intakeStatus: "pending_tenant",
         rents: initialRents,
-      });
+      }));
     } catch (e) {
       // ✅ if bed unique index hits (category+roomNo+bedNo)
       if (e?.code === 11000 && e?.keyPattern?.category && e?.keyPattern?.roomNo && e?.keyPattern?.bedNo) {
-        const activeConflict = (await Form.find({ roomNo, bedNo })
+        const activeConflict = (await Form.find(scopedQuery(req, { roomNo, bedNo }))
           .select("_id name category leaveDate")
           .lean()).find((tenant) => isActiveBedTenant(tenant, category));
 
@@ -476,6 +689,7 @@ exports.createInvite = async (req, res) => {
       prefill: {
         ...prefill,
         category,
+        propertyType,
         roomNo,
         bedNo,
         name,
@@ -485,39 +699,27 @@ exports.createInvite = async (req, res) => {
         srNo: createdForm.srNo,
         firstRentStatus,
         firstRentMonth,
+        paymentMode,
+        hasCanteen,
+        canteenPlanType,
+        canteenStartDate,
+        canteenMonthlyAmount,
+        canteenIncludedMeals,
       },
       usedByFormId: createdForm._id, // ✅ link to draft form id
       usedAt: null,
+      organizationId: req.organizationId || null,
+      expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
     });
-
-    const origin =
-      req.get("X-Origin") ||
-      req.get("Origin") ||
-      "  http://localhost:8000";
-
-    const url = new URL(getTenantIntakePath(), origin);
-    url.searchParams.set("tenant", "true");
-    url.searchParams.set("lock", "1");
-    url.searchParams.set("inv", token);
-    if (prefill.name) url.searchParams.set("name", String(prefill.name));
-    if (prefill.phoneNo) url.searchParams.set("phoneNo", String(prefill.phoneNo));
-    if (category) url.searchParams.set("category", category);
-    if (roomNo) url.searchParams.set("roomNo", roomNo);
-    if (bedNo) url.searchParams.set("bedNo", bedNo);
-    if (joiningDate) url.searchParams.set("joiningDate", String(joiningDate));
-    if (monthlyRent != null) {
-      url.searchParams.set("baseRent", String(monthlyRent));
-      url.searchParams.set("rentAmount", String(monthlyRent));
-    }
-    if (dep != null) url.searchParams.set("depositAmount", String(dep));
 
     return res.json({
       ok: true,
       token,
-      url: url.toString(),
+      url: previewUrl,
       inviteId: doc._id,
       formId: createdForm._id,
       srNo: createdForm.srNo,
+      expiresAt: doc.expiresAt,
     });
   } catch (err) {
     console.error("Create invite failed:", err);
@@ -531,12 +733,86 @@ exports.createInvite = async (req, res) => {
 // ===============================
 // VALIDATE INVITE ✅ (returns formId + srNo + prefill)
 // ===============================
+exports.createInviteForForm = async (req, res) => {
+  try {
+    const { id, formId } = req.params;
+    const tenantId = id || formId;
+    const existing = await Form.findOne(scopedQuery(req, { _id: tenantId })).lean();
+    if (!existing) return res.status(404).json({ ok: false, message: "Tenant not found" });
+
+    const token = crypto.randomUUID();
+    const monthlyRent = Number(existing.baseRent ?? existing.rentAmount ?? 0);
+    const prefill = Object.fromEntries(
+      Object.entries({
+        name: existing.name,
+        phoneNo: existing.phoneNo,
+        category: existing.category,
+        propertyType: await inferInvitePropertyType(existing, req.organizationId || existing.organizationId),
+        roomId: existing.roomId,
+        floorNo: existing.floorNo,
+        roomNo: existing.roomNo,
+        bedNo: existing.bedNo,
+        joiningDate: existing.joiningDate,
+        baseRent: monthlyRent,
+        rentAmount: monthlyRent,
+        depositAmount: existing.depositAmount,
+        firstRentStatus: existing.firstRentStatus,
+        firstRentMonth: existing.firstRentMonth,
+        paymentMode: existing.paymentMode,
+        hasCanteen: existing.propertyType === "bed" ? Boolean(existing.hasCanteen) : false,
+        canteenPlanType: existing.canteenPlanType,
+        canteenStartDate: existing.canteenStartDate,
+        canteenMonthlyAmount: existing.canteenMonthlyAmount,
+        canteenIncludedMeals: existing.canteenIncludedMeals,
+        familyMembers: existing.familyMembers,
+        shopName: existing.shopName,
+        shopBusiness: existing.shopBusiness,
+        address: existing.address,
+        pincode: existing.pincode,
+        city: existing.city,
+        state: existing.state,
+        houseNo: existing.houseNo,
+        nearbyPlace: existing.nearbyPlace,
+        companyAddress: existing.companyAddress,
+        dateOfJoiningCollege: existing.dateOfJoiningCollege,
+        dob: existing.dob,
+        ...(req.body || {}),
+      }).filter(([, value]) => value !== "" && value != null)
+    );
+
+    const doc = await Invite.create({
+      token,
+      prefill,
+      usedByFormId: existing._id,
+      usedAt: null,
+      organizationId: req.organizationId || existing.organizationId || null,
+      expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
+    });
+
+    return res.json({
+      ok: true,
+      token,
+      url: buildInviteUrl(req, token, { ...prefill, monthlyRent, depositAmount: existing.depositAmount }),
+      inviteId: doc._id,
+      formId: existing._id,
+      srNo: existing.srNo,
+      expiresAt: doc.expiresAt,
+    });
+  } catch (err) {
+    console.error("Create invite for form failed:", err);
+    return res.status(500).json({ ok: false, message: err?.message || "Failed to create invite" });
+  }
+};
+
 exports.validateInvite = async (req, res) => {
   try {
     const { token } = req.params;
     const now = new Date();
 
-    const invDoc = await Invite.findOne({ token }).populate("usedByFormId", "srNo");
+    const invDoc = await Invite.findOne({ token }).populate(
+      "usedByFormId",
+      "srNo propertyType roomId roomNo bedNo hasCanteen canteenPlanType canteenStartDate canteenMonthlyAmount canteenIncludedMeals documents intakeStatus address pincode city state houseNo nearbyPlace relativeAddress1 relative1Relation relative1Name relative1Phone relative2Relation relative2Name relative2Phone familyMembers shopName shopBusiness companyAddress dateOfJoiningCollege dob"
+    );
     if (!invDoc) return res.status(404).json({ ok: false, message: "Invite not found" });
 
     if (invDoc.expiresAt && invDoc.expiresAt <= now) {
@@ -553,7 +829,23 @@ exports.validateInvite = async (req, res) => {
 
     const formId = String(invDoc.usedByFormId?._id || invDoc.usedByFormId);
     const srNo = invDoc.usedByFormId?.srNo;
+    const existingForm = invDoc.usedByFormId && typeof invDoc.usedByFormId === "object" ? invDoc.usedByFormId : null;
+    const existingFormValues = existingForm?.toObject ? existingForm.toObject() : existingForm || {};
     const prefill = { ...(invDoc.prefill || {}) };
+    for (const key of [
+      "address", "pincode", "city", "state", "houseNo", "nearbyPlace", "relativeAddress1",
+      "relative1Relation", "relative1Name", "relative1Phone",
+      "relative2Relation", "relative2Name", "relative2Phone",
+      "propertyType", "hasCanteen", "canteenPlanType", "canteenStartDate", "canteenMonthlyAmount", "canteenIncludedMeals", "familyMembers", "shopName", "shopBusiness", "companyAddress", "dateOfJoiningCollege", "dob",
+    ]) {
+      if ((prefill[key] === undefined || prefill[key] === null || prefill[key] === "") && existingForm?.[key]) {
+        prefill[key] = existingForm[key];
+      }
+    }
+    prefill.propertyType = await inferInvitePropertyType(
+      { ...existingFormValues, ...prefill },
+      invDoc.organizationId
+    );
     if (prefill.baseRent !== "" && prefill.baseRent != null) {
       prefill.rentAmount = prefill.baseRent;
     }
@@ -566,6 +858,8 @@ exports.validateInvite = async (req, res) => {
       formId,
       srNo,
       prefill: { ...prefill, ...(srNo ? { srNo } : {}) },
+      existingDocuments: Array.isArray(existingForm?.documents) ? existingForm.documents : [],
+      intakeStatus: existingForm?.intakeStatus,
       lockedFields,
     });
   } catch (err) {

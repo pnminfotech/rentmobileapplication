@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-const { suppliersDB } = require("../config/mainte"); 
 
 const PaymentSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
@@ -45,7 +44,7 @@ const ProjectSchema = new mongoose.Schema({
   ]
 });
 
-const Project = suppliersDB.model("Project", ProjectSchema);
+const Project = mongoose.models.Project || mongoose.model("Project", ProjectSchema);
 module.exports = Project;
 
 

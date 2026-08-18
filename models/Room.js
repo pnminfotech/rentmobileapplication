@@ -12,6 +12,12 @@ const BedSchema = new mongoose.Schema(
 
 const RoomSchema = new mongoose.Schema(
   {
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true,
+    },
     propertyType: {
       type: String,
       enum: ["bed", "room", "shop"],
@@ -23,9 +29,20 @@ const RoomSchema = new mongoose.Schema(
     floorNo: { type: String, required: true },  // e.g. Ground, 1, 2nd, Basement
     flatType: { type: String, default: "" },
     roomNo: { type: String, required: true },
+    meterNo: { type: String, default: "" },
+    lastMeterReading: { type: Number, default: null },
     beds: { type: [BedSchema], default: [] },
   },
   { timestamps: true }
 );
+
+RoomSchema.index({
+  organizationId: 1,
+  propertyType: 1,
+  category: 1,
+  floorNo: 1,
+  roomNo: 1,
+  wingName: 1,
+});
 
 module.exports = mongoose.model("Room", RoomSchema);

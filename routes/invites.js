@@ -1,328 +1,60 @@
-// // routes/invites.js  (CJS)
-// const express = require("express");
-// const crypto = require("crypto");
-// const Invite = require("../models/Invite"); // CJS model
-
-// const router = express.Router();
-
-// /** Create a one-time invite */
-// router.post("/", async (req, res) => {
-//   try {
-//     const {
-//       name,
-//       phoneNo,
-//       roomNo,
-//       bedNo,
-//       baseRent,
-//       rentAmount,
-//       depositAmount,
-//        joiningDate
-//       // expiresInDays // optional if you want
-//     } = req.body;
-
-//     const token = crypto.randomUUID();
-//     const inv = await Invite.create({
-//       token,
-//       name,
-//       phoneNo,
-//       roomNo,
-//       bedNo,
-//       baseRent,
-//       rentAmount,
-//       depositAmount,
-//        joiningDate,
-//       // createdBy: req.user?.id,
-//       // expiresAt: new Date(Date.now() + (expiresInDays ?? 7) * 864e5),
-//     });
-
-//     const origin =
-//       req.headers["x-origin"] ||
-//       `${req.protocol}://${req.get("host")}`;
-
-//     const url = new URL("/HostelManager/tenant-intake", origin);
-//     url.searchParams.set("tenant", "true");
-//     url.searchParams.set("lock", "1");
-//     url.searchParams.set("inv", token);
-
-//     // (optional) include prefill in the URL too
-//     if (name) url.searchParams.set("name", name);
-//     if (phoneNo) url.searchParams.set("phoneNo", phoneNo);
-//     if (roomNo) url.searchParams.set("roomNo", roomNo);
-//     if (bedNo) url.searchParams.set("bedNo", bedNo);
-//     if (baseRent != null) url.searchParams.set("baseRent", String(baseRent));
-//     if (rentAmount != null) url.searchParams.set("rentAmount", String(rentAmount));
-//     if (depositAmount != null) url.searchParams.set("depositAmount", String(depositAmount));
-// if (joiningDate) url.searchParams.set("joiningDate", String(joiningDate));
-
-//     res.json({ ok: true, token, url: url.toString() });
-//   } catch (err) {
-//     console.error("Create invite failed:", err);
-//     res.status(500).json({ ok: false, message: "Failed to create invite" });
-//   }
-// });
-
-// /** Validate invite and return prefill data */
-// router.get("/:token", async (req, res) => {
-//   try {
-//     const inv = await Invite.findOne({ token: req.params.token });
-//     if (!inv) return res.status(404).json({ ok: false, reason: "not_found" });
-
-//     const now = new Date();
-//     if (inv.usedAt) return res.status(409).json({ ok: false, reason: "used" });
-//     if (inv.expiresAt && inv.expiresAt <= now)
-//       return res.status(410).json({ ok: false, reason: "expired" });
-
-//     res.json({
-//       ok: true,
-//     prefill: {
-//   name: inv.name || "",
-//   phoneNo: inv.phoneNo || "",
-//   roomNo: inv.roomNo || "",
-//   bedNo: inv.bedNo || "",
-//   joiningDate: inv.joiningDate ? inv.joiningDate.toISOString().slice(0,10) : "",
-//   baseRent: inv.baseRent ?? "",
-//   rentAmount: inv.rentAmount ?? inv.baseRent ?? "",
-//   depositAmount: inv.depositAmount ?? "",
-// },
-
-//     });
-//   } catch (err) {
-//     console.error("Validate invite failed:", err);
-//     res.status(500).json({ ok: false, message: "Server error" });
-//   }
-// });
-
-// module.exports = router;
-
-
-
 const express = require("express");
-const crypto = require("crypto");
+const mongoose = require("mongoose");
+
 const Invite = require("../models/Invite");
 const Form = require("../models/formModels");
-
+const Room = require("../models/Room");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const {
+  createInvite,
+  createInviteForForm,
+  validateInvite,
+} = require("../controllers/invites");
+const Organization = require("../models/Organization");
+const { sendAdmissionSms } = require("../services/smsService");
 const router = express.Router();
 
-router.post("/", async (req, res) => {
-  try {
-    const {
-      name,
-      phoneNo,
-      roomNo,
-      bedNo,
-      joiningDate,
-      baseRent,
-      rentAmount,
-      depositAmount,
-      // any other fields you want to prefill
-    } = req.body;
+function propertyTypeFromTenant(tenant = {}) {
+  const explicit = String(tenant.propertyType || "").toLowerCase();
+  if (["room", "shop"].includes(explicit)) return explicit;
 
-    // ✅ Validate minimal required fields to create tenant
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ ok: false, message: "Name is required" });
-    }
-    if (!joiningDate) {
-      return res.status(400).json({ ok: false, message: "Joining Date is required" });
-    }
+  const bedNo = String(tenant.bedNo || "").toUpperCase();
+  if (bedNo === "SHOP-1") return "shop";
+  if (bedNo === "ROOM-1") return "room";
+  return "bed";
+}
 
-    const monthlyRentSource =
-      baseRent !== "" && baseRent != null ? baseRent : rentAmount;
-    const monthlyRent = Number(monthlyRentSource ?? 0);
-    if (!Number.isFinite(monthlyRent) || monthlyRent <= 0) {
-      return res.status(400).json({ ok: false, message: "Rent amount is required" });
-    }
+async function inferPropertyTypeFromRoom(tenant = {}, organizationId) {
+  const direct = propertyTypeFromTenant(tenant);
+  if (direct !== "bed") return direct;
 
-    const dep = Number(depositAmount ?? 0);
+  const roomId = String(tenant.roomId || "").trim();
+  const roomNo = String(tenant.roomNo || "").trim();
+  const scope = organizationId ? { organizationId } : {};
+  const query = roomId && mongoose.Types.ObjectId.isValid(roomId)
+    ? { _id: roomId, ...scope }
+    : roomNo
+    ? { roomNo, ...scope }
+    : null;
 
-    // ✅ 1) Create Form right now (save admin filled data)
-    const createdForm = await Form.create({
-      name: String(name).trim(),
-      phoneNo: phoneNo ? Number(phoneNo) : undefined,
-      roomNo,
-      bedNo,
-      joiningDate: new Date(joiningDate),
-      depositAmount: dep,
-      baseRent: monthlyRent,
+  if (!query) return "bed";
 
-      // ✅ IMPORTANT: do NOT create payment at share time
-      rents: [],
-    });
+  const room = await Room.findOne(query).select("propertyType").lean();
+  const roomType = String(room?.propertyType || "").toLowerCase();
+  return ["room", "shop"].includes(roomType) ? roomType : "bed";
+}
 
-    // ✅ 2) Create Invite linked to that Form
-    const token = crypto.randomUUID();
+router.post("/", attachSystemAuthIfPresent, authAdmin, createInvite);
+router.post("/for-form/:id", attachSystemAuthIfPresent, authAdmin, createInviteForForm);
+router.get("/:token", validateInvite);
 
-    const inv = await Invite.create({
-      token,
-      usedByFormId: createdForm._id,  // ✅ link
-      prefill: {
-        name: String(name).trim(),
-        phoneNo: phoneNo || "",
-        roomNo: roomNo || "",
-        bedNo: bedNo || "",
-        joiningDate,
-        baseRent: monthlyRent,
-        rentAmount: monthlyRent,
-        depositAmount: dep,
-      },
-      // expiresAt auto by schema
-    });
-
-    const origin =
-      req.headers["x-origin"] || `${req.protocol}://${req.get("host")}`;
-
-    const url = new URL("/mutakegirlshostel/tenant-intake", origin);
-    url.searchParams.set("tenant", "true");
-    url.searchParams.set("lock", "1");
-    url.searchParams.set("inv", token);
-    if (prefill.name) url.searchParams.set("name", String(prefill.name));
-    if (prefill.phoneNo) url.searchParams.set("phoneNo", String(prefill.phoneNo));
-    if (category) url.searchParams.set("category", category);
-    if (roomNo) url.searchParams.set("roomNo", roomNo);
-    if (bedNo) url.searchParams.set("bedNo", bedNo);
-    if (joiningDate) url.searchParams.set("joiningDate", String(joiningDate));
-    if (monthlyRent != null) {
-      url.searchParams.set("baseRent", String(monthlyRent));
-      url.searchParams.set("rentAmount", String(monthlyRent));
-    }
-    if (dep != null) url.searchParams.set("depositAmount", String(dep));
-
-    res.json({ ok: true, token, url: url.toString(), formId: createdForm._id });
-  } catch (err) {
-    console.error("Create invite failed:", err);
-    res.status(500).json({ ok: false, message: "Failed to create invite" });
-  }
-});
-
-// Create invite for an existing tenant form (edit/share again)
-router.post("/for-form/:formId", async (req, res) => {
-  try {
-    const { formId } = req.params;
-    const existing = await Form.findById(formId).lean();
-    if (!existing) {
-      return res.status(404).json({ ok: false, message: "Form not found" });
-    }
-
-    const token = crypto.randomUUID();
-
-    const prefillBase = {
-      name: existing.name,
-      phoneNo: existing.phoneNo,
-      roomNo: existing.roomNo,
-      bedNo: existing.bedNo,
-      joiningDate: existing.joiningDate,
-      baseRent: existing.baseRent,
-      rentAmount: existing.rentAmount ?? existing.baseRent,
-      depositAmount: existing.depositAmount,
-      category: existing.category,
-      firstRentStatus: existing.firstRentStatus,
-      firstRentMonth: existing.firstRentMonth,
-    };
-
-    const monthlyRentSource =
-      prefillBase.baseRent !== "" && prefillBase.baseRent != null
-        ? prefillBase.baseRent
-        : prefillBase.rentAmount;
-    const monthlyRent = Number(monthlyRentSource ?? 0);
-    const dep = Number(existing.depositAmount ?? 0);
-
-    const merged = { ...prefillBase, ...(req.body || {}) };
-    const prefill = {};
-    for (const [k, v] of Object.entries(merged)) {
-      if (v === undefined || v === null || v === "") continue;
-      prefill[k] = v;
-    }
-
-    const inv = await Invite.create({
-      token,
-      usedByFormId: existing._id,
-      prefill,
-      usedAt: null,
-      // expiresAt stays null by default (never expires until used)
-    });
-
-    const origin =
-      req.headers["x-origin"] || `${req.protocol}://${req.get("host")}`;
-
-    const url = new URL("/mutakegirlshostel/tenant-intake", origin);
-    url.searchParams.set("tenant", "true");
-    url.searchParams.set("lock", "1");
-    url.searchParams.set("inv", token);
-    if (existing.name) url.searchParams.set("name", String(existing.name));
-    if (existing.phoneNo) url.searchParams.set("phoneNo", String(existing.phoneNo));
-    if (existing.category) url.searchParams.set("category", String(existing.category));
-    if (existing.roomNo) url.searchParams.set("roomNo", String(existing.roomNo));
-    if (existing.bedNo) url.searchParams.set("bedNo", String(existing.bedNo));
-    if (existing.joiningDate) url.searchParams.set("joiningDate", String(existing.joiningDate));
-    if (Number.isFinite(monthlyRent) && monthlyRent > 0) {
-      url.searchParams.set("baseRent", String(monthlyRent));
-      url.searchParams.set("rentAmount", String(monthlyRent));
-    }
-    if (dep != null) url.searchParams.set("depositAmount", String(dep));
-
-    res.json({ ok: true, token, url: url.toString(), formId: existing._id, inviteId: inv._id });
-  } catch (err) {
-    console.error("Create invite for form failed:", err);
-    res.status(500).json({ ok: false, message: "Failed to create invite" });
-  }
-});
-
-
-
-
-router.get("/:token", async (req, res) => {
-  try {
-    const invDoc = await Invite.findOne({ token: req.params.token })
-      .populate("usedByFormId", "srNo");
-
-    if (!invDoc)
-      return res.status(404).json({ ok: false, message: "Invite not found" });
-
-    const now = new Date();
-    if (invDoc.expiresAt && invDoc.expiresAt <= now)
-      return res.status(410).json({ ok: false, message: "Invite expired" });
-
-    if (!invDoc.usedByFormId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Invite not linked to a draft form (usedByFormId missing).",
-      });
-    }
-
-    // ✅ IMPORTANT: populate may fail sometimes, so support both cases
-    const formId = String(invDoc.usedByFormId?._id || invDoc.usedByFormId);
-    const srNo = invDoc.usedByFormId?.srNo;
-
-    const prefill = { ...(invDoc.prefill || {}) };
-    if (prefill.baseRent !== "" && prefill.baseRent != null) {
-      prefill.rentAmount = prefill.baseRent;
-    }
-
-    return res.json({
-      ok: true,
-      formId,
-      srNo,
-      prefill: { ...prefill, ...(srNo ? { srNo } : {}) },
-      // optional info
-      alreadyLinked: !!invDoc.usedAt,
-    });
-  } catch (err) {
-    console.error("Validate invite failed:", err);
-    return res.status(500).json({ ok: false, message: "Server error" });
-  }
-});
-
-
-
-
-
-
-// ✅ SUBMIT INVITE FORM (UPDATE SAME DOC, NO NEW INSERT)
-router.put("/:token/submit", async (req, res) => {
+async function submitInviteForm(req, res) {
+  let claimedInvite = null;
   try {
     const token = req.params.token;
     const now = new Date();
 
-    // ✅ claim token (atomic): only one request wins
     const inv = await Invite.findOneAndUpdate(
       {
         token,
@@ -334,18 +66,32 @@ router.put("/:token/submit", async (req, res) => {
     );
 
     if (!inv) {
-      // either invalid / expired / already used
       const exists = await Invite.findOne({ token }).lean();
       if (!exists) return res.status(404).json({ ok: false, message: "Invalid link" });
       if (exists.expiresAt && exists.expiresAt <= now) return res.status(410).json({ ok: false, message: "Link expired" });
       return res.status(409).json({ ok: false, message: "Link already used" });
     }
 
-    const formId = inv.usedByFormId;
-    if (!formId) return res.status(400).json({ ok: false, message: "Draft form missing" });
+    claimedInvite = inv;
 
-    const lockedValues = Object.fromEntries(
+    const formId = inv.usedByFormId;
+    if (!formId) {
+      await Invite.updateOne({ _id: inv._id, usedAt: now }, { $set: { usedAt: null } });
+      claimedInvite = null;
+      return res.status(400).json({ ok: false, message: "Draft form missing" });
+    }
+
+    const allPrefillValues = Object.fromEntries(
       Object.entries(inv.prefill || {}).filter(([, value]) => value !== "" && value != null)
+    );
+    const lockedFieldNames = new Set([
+      "category", "roomId", "floorNo", "roomNo", "bedNo",
+      "propertyType", "baseRent", "rentAmount", "firstRentMonth",
+      "name", "phoneNo", "joiningDate", "depositAmount", "firstRentStatus", "paymentMode",
+      "hasCanteen", "canteenPlanType", "canteenStartDate", "canteenMonthlyAmount", "canteenIncludedMeals",
+    ]);
+    const lockedValues = Object.fromEntries(
+      Object.entries(allPrefillValues).filter(([key]) => lockedFieldNames.has(key))
     );
     const lockedKeys = new Set(Object.keys(lockedValues));
     const incoming = { ...(req.body || {}) };
@@ -354,18 +100,122 @@ router.put("/:token/submit", async (req, res) => {
       delete incoming[key];
     }
 
-    const updated = await Form.findByIdAndUpdate(
-      formId,
-      { $set: { ...lockedValues, ...incoming } },
+    const releaseInvite = () =>
+      Invite.updateOne({ _id: inv._id, usedAt: now }, { $set: { usedAt: null } });
+    const existingForm = await Form.findOne({
+      _id: formId,
+      ...(inv.organizationId ? { organizationId: inv.organizationId } : {}),
+    }).lean();
+
+    if (!existingForm) {
+      await releaseInvite();
+      claimedInvite = null;
+      return res.status(404).json({ ok: false, message: "Tenant draft not found" });
+    }
+
+    const propertyType = await inferPropertyTypeFromRoom({ ...existingForm, ...(inv.prefill || {}) }, inv.organizationId);
+    const isResidentialRoom = propertyType === "room";
+    const isShop = propertyType === "shop";
+    const requiredFields = [
+      ["address", "Address"], ["pincode", "Pincode"], ["city", "City"],
+      ["state", "State"], ["houseNo", "House number"], ["nearbyPlace", "Nearby place"],
+      ...(isShop ? [] : [["dob", "Date of birth"]]),
+      ...(isResidentialRoom
+        ? [["familyMembers", "No. of family members"]]
+        : isShop
+        ? [["shopBusiness", "Shop work/business"]]
+        : [
+            ["relativeAddress1", "Relative address"],
+            ["relative1Relation", "First contact relation"],
+            ["relative1Name", "First contact name"], ["relative1Phone", "First contact phone"],
+            ["relative2Relation", "Second contact relation"],
+            ["relative2Name", "Second contact name"], ["relative2Phone", "Second contact phone"],
+            ["companyAddress", "Company or college"],
+            ["dateOfJoiningCollege", "Company or college joining date"],
+          ]),
+    ];
+
+    for (const [key, label] of requiredFields) {
+      if (!String(incoming[key] ?? existingForm[key] ?? "").trim()) {
+        await releaseInvite();
+        return res.status(400).json({ ok: false, message: `${label} is required` });
+      }
+    }
+
+    if (!/^\d{6}$/.test(String(incoming.pincode ?? existingForm.pincode ?? ""))) {
+      await releaseInvite();
+      return res.status(400).json({ ok: false, message: "Pincode must be 6 digits" });
+    }
+
+    if (!isResidentialRoom && !isShop && [
+      incoming.relative1Phone ?? existingForm.relative1Phone,
+      incoming.relative2Phone ?? existingForm.relative2Phone,
+    ].some((value) => !/^\d{10}$/.test(String(value)))) {
+      await releaseInvite();
+      return res.status(400).json({ ok: false, message: "Contact phone numbers must be 10 digits" });
+    }
+
+    const documents = Array.isArray(incoming.documents) ? incoming.documents : [];
+    const existingDocuments = Array.isArray(existingForm.documents) ? existingForm.documents : [];
+    const relations = new Set([...existingDocuments, ...documents].map((document) => String(document?.relation || "").toLowerCase()));
+    const requiredDocumentRelations = isResidentialRoom
+      ? ["self aadhaar card", "partner aadhaar card", "tenant photograph (selfie)"]
+      : isShop
+      ? ["self aadhaar card", "tenant photograph (selfie)"]
+      : ["self aadhaar card", "parent aadhaar card", "tenant photo"];
+
+    if (!requiredDocumentRelations.every((relation) => relations.has(relation))) {
+      await releaseInvite();
+      return res.status(400).json({ ok: false, message: "All required tenant documents are required" });
+    }
+
+    if (documents.length) {
+      const replacedRelations = new Set(
+        documents.map((document) => String(document?.relation || "").trim().toLowerCase()).filter(Boolean)
+      );
+      incoming.documents = [
+        ...existingDocuments.filter(
+          (document) => !replacedRelations.has(String(document?.relation || "").trim().toLowerCase())
+        ),
+        ...documents,
+      ];
+    } else {
+      delete incoming.documents;
+    }
+
+    const updated = await Form.findOneAndUpdate(
+      { _id: formId, ...(inv.organizationId ? { organizationId: inv.organizationId } : {}) },
+      { $set: { ...lockedValues, ...incoming, propertyType, intakeStatus: "submitted" } },
       { new: true }
     );
 
+    if (!updated) {
+      await releaseInvite();
+      claimedInvite = null;
+      return res.status(404).json({ ok: false, message: "Tenant draft not found" });
+    }
+const organization = updated.organizationId
+  ? await Organization.findById(updated.organizationId).lean()
+  : null;
+
+sendAdmissionSms(updated, organization || {}).catch((err) =>
+  console.error("Admission SMS failed:", err.message)
+);
+    claimedInvite = null;
     return res.json({ ok: true, message: "Saved", form: updated });
   } catch (err) {
+    if (claimedInvite?._id) {
+      await Invite.updateOne(
+        { _id: claimedInvite._id, usedAt: claimedInvite.usedAt },
+        { $set: { usedAt: null } }
+      ).catch(() => {});
+    }
     console.error("Invite submit failed:", err);
-    res.status(500).json({ ok: false, message: "Server error" });
+    return res.status(500).json({ ok: false, message: err?.message || "Server error" });
   }
-});
+}
 
+router.put("/:token/submit", submitInviteForm);
 
 module.exports = router;
+module.exports.submitInviteForm = submitInviteForm;

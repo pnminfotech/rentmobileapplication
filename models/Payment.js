@@ -21,7 +21,14 @@
 const mongoose = require('mongoose');
 
 const paymentSchema = new mongoose.Schema({
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Organization",
+    default: null,
+    index: true,
+  },
   tenant: { type: mongoose.Schema.Types.ObjectId, ref: 'Form', required: true },
+  invoiceId: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", index: true },
   amount: { type: Number, required: true },
   month:  { type: Number, min: 1, max: 12 }, // ✅ 1–12, matches your frontend
   year:   { type: Number },
@@ -29,6 +36,11 @@ const paymentSchema = new mongoose.Schema({
   note:   { type: String },
   status: { type: String, enum: ['reported','confirmed','rejected'], default: 'reported' },
   paymentMode: { type: String, default: 'Online' },
+  method: { type: String },
+  at: { type: Date },
 }, { timestamps: true });
+
+paymentSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
+paymentSchema.index({ organizationId: 1, tenant: 1, month: 1, year: 1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);

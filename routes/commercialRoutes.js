@@ -3,14 +3,20 @@ const router = express.Router();
 
 const CommercialUnit = require("../models/CommercialUnit");
 const Form = require("../models/Form");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { scopedQuery, scopedCreate, scopedUpdate } = require("../utils/organizationScope");
+
+router.use(attachSystemAuthIfPresent);
+router.use(authAdmin);
 
 function normalizeUnitType(value) {
   return String(value || "").trim().toLowerCase() === "shop" ? "shop" : "room";
 }
 
-router.get("/", async (_req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const units = await CommercialUnit.find().sort({
+    const units = await CommercialUnit.find(scopedQuery(req)).sort({
       category: 1,
       buildingName: 1,
       floorNo: 1,
@@ -45,7 +51,7 @@ router.post("/", async (req, res) => {
           : Number(price),
     };
 
-    const created = await CommercialUnit.create(payload);
+    const created = await CommercialUnit.create(scopedCreate(req, payload));
     res.status(201).json(created);
   } catch (err) {
     console.error("create commercial unit error:", err);
@@ -76,9 +82,9 @@ router.put("/:unitId", async (req, res) => {
           : Number(price);
     }
 
-    const updated = await CommercialUnit.findByIdAndUpdate(
-      unitId,
-      { $set: update },
+    const updated = await CommercialUnit.findOneAndUpdate(
+      scopedQuery(req, { _id: unitId }),
+      { $set: scopedUpdate(req, update) },
       { new: true, runValidators: true }
     );
 
@@ -101,16 +107,16 @@ router.put("/:unitId", async (req, res) => {
 router.delete("/:unitId", async (req, res) => {
   try {
     const { unitId } = req.params;
-    const unit = await CommercialUnit.findById(unitId);
+    const unit = await CommercialUnit.findOne(scopedQuery(req, { _id: unitId }));
 
     if (!unit) {
       return res.status(404).json({ message: "Commercial unit not found" });
     }
 
-    const activeTenant = await Form.findOne({
+    const activeTenant = await Form.findOne(scopedQuery(req, {
       roomId: String(unit._id),
       leaveDate: { $in: [null, ""] },
-    }).lean();
+    })).lean();
 
     if (activeTenant) {
       return res.status(400).json({
@@ -118,7 +124,7 @@ router.delete("/:unitId", async (req, res) => {
       });
     }
 
-    await CommercialUnit.findByIdAndDelete(unitId);
+    await CommercialUnit.findOneAndDelete(scopedQuery(req, { _id: unitId }));
     res.json({ message: "Commercial unit deleted successfully" });
   } catch (err) {
     console.error("delete commercial unit error:", err);

@@ -192,6 +192,18 @@ const express = require("express");
 const router = express.Router();
 const Room = require("../models/Room");
 const Form = require("../models/Form");
+const authAdmin = require("../middleware/adminAuth");
+const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
+const { assertUnitCapacity, getUnitQuota } = require("../services/unitQuota");
+const {
+  scopedQuery,
+  scopedCreate,
+  scopedUpdate,
+  ensureScopedDocument,
+} = require("../utils/organizationScope");
+
+router.use(attachSystemAuthIfPresent);
+router.use(authAdmin);
 
 function normalizePropertyType(value) {
   const raw = String(value || "").trim().toLowerCase();
@@ -199,12 +211,80 @@ function normalizePropertyType(value) {
   return "bed";
 }
 
+function normalizeText(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function normalizeIdentifier(value) {
+  return normalizeText(value).toUpperCase();
+}
+
+function todayKey() {
+  const date = new Date();
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function activeTenantQueryForUnit(room) {
+  const propertyType = normalizePropertyType(room.propertyType);
+  const endOfToday = new Date();
+  endOfToday.setHours(23, 59, 59, 999);
+
+  return {
+    propertyType,
+    category: String(room.category || "").trim(),
+    floorNo: String(room.floorNo || "").trim(),
+    roomNo: String(room.roomNo || "").trim(),
+    intakeStatus: { $ne: "pending_tenant" },
+    $or: [
+      { leaveDate: { $exists: false } },
+      { leaveDate: null },
+      { leaveDate: "" },
+      { leaveDate: { $type: "string", $gt: todayKey() } },
+      { leaveDate: { $type: "date", $gt: endOfToday } },
+    ],
+  };
+}
+
 router.get("/", async (req, res) => {
   try {
-    const rooms = await Room.find().sort({ floorNo: 1, roomNo: 1 });
+    const rooms = await Room.find(scopedQuery(req)).sort({ floorNo: 1, roomNo: 1 });
     res.json(rooms);
   } catch (err) {
     res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.get("/usage", async (req, res) => {
+  try {
+    const quota = await getUnitQuota(req.organizationId);
+    res.json(quota);
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || "Unable to load unit usage",
+      code: err.code,
+    });
+  }
+});
+
+router.get("/:roomId", async (req, res) => {
+  try {
+    const unit = await Room.findOne(scopedQuery(req, { _id: req.params.roomId })).lean();
+    if (!unit) return res.status(404).json({ message: "Unit not found" });
+
+    const quota = await getUnitQuota(req.organizationId);
+    res.json({ unit, quota });
+  } catch (err) {
+    if (err?.name === "CastError") {
+      return res.status(404).json({ message: "Unit not found" });
+    }
+    res.status(err.status || 500).json({
+      message: err.message || "Unable to load unit",
+      code: err.code,
+    });
   }
 });
 
@@ -219,19 +299,50 @@ router.post("/", async (req, res) => {
       hasWing,
       wingName,
       flatType,
+      meterNo,
+      lastMeterReading,
+      bedCount,
+      bedCategory,
+      price,
     } = req.body || {};
     if (!category || !floorNo || !roomNo) {
       return res.status(400).json({ message: "category, floorNo and roomNo are required" });
     }
 
-    const cat = String(category).trim();
-    const flr = String(floorNo).trim();
-    const rno = String(roomNo).trim();
+    const cat = normalizeText(category);
+    const flr = normalizeText(floorNo);
+    const rno = normalizeIdentifier(roomNo);
     const normalizedPropertyType = normalizePropertyType(propertyType);
     const normalizedHasWing = Boolean(hasWing);
-    const normalizedWingName = normalizedHasWing ? String(wingName || "").trim() : "";
+    const normalizedWingName = normalizedHasWing ? normalizeText(wingName) : "";
     const normalizedFlatType =
-      normalizedPropertyType === "room" ? String(flatType || "").trim() : "";
+      normalizedPropertyType === "room" ? normalizeText(flatType) : "";
+    const normalizedMeterNo = normalizeIdentifier(meterNo);
+    const normalizedPrice =
+      price === undefined || price === "" ? null : Number(price);
+    const normalizedLastMeterReading =
+      lastMeterReading === undefined || lastMeterReading === "" || lastMeterReading === null
+        ? null
+        : Number(lastMeterReading);
+
+    if (normalizedPrice !== null && (!Number.isFinite(normalizedPrice) || normalizedPrice < 0)) {
+      return res.status(400).json({ message: "Invalid monthly price" });
+    }
+    if (normalizedLastMeterReading !== null && (!Number.isFinite(normalizedLastMeterReading) || normalizedLastMeterReading < 0)) {
+      return res.status(400).json({ message: "Invalid meter reading" });
+    }
+
+    const normalizedBedCount =
+      normalizedPropertyType === "bed" && bedCount !== undefined
+        ? Number(bedCount)
+        : 0;
+    if (
+      normalizedPropertyType === "bed" &&
+      bedCount !== undefined &&
+      (!Number.isInteger(normalizedBedCount) || normalizedBedCount < 1)
+    ) {
+      return res.status(400).json({ message: "bedCount must be a positive integer" });
+    }
 
     if ((normalizedPropertyType === "room" || normalizedPropertyType === "shop") && normalizedHasWing && !normalizedWingName) {
       return res.status(400).json({ message: "wingName is required when hasWing is enabled" });
@@ -241,30 +352,51 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ message: "flatType is required for residential rooms" });
     }
 
-    const existing = await Room.findOne({
+    const existing = await Room.findOne(scopedQuery(req, {
       propertyType: normalizedPropertyType,
       category: cat,
       floorNo: flr,
       roomNo: rno,
       wingName: normalizedWingName,
-    });
+    })).collation({ locale: "en", strength: 2 });
 
     if (existing) {
       return res.status(400).json({ message: "Unit already exists in this location" });
     }
 
+    if (normalizedMeterNo) {
+      const existingMeter = await Room.findOne(scopedQuery(req, {
+        meterNo: normalizedMeterNo,
+      })).collation({ locale: "en", strength: 2 });
+      if (existingMeter) {
+        return res.status(400).json({ message: "Meter number already exists for another unit" });
+      }
+    }
+
+    const requestedUnits =
+      normalizedPropertyType === "bed"
+        ? { beds: normalizedBedCount }
+        : normalizedPropertyType === "room"
+          ? { rooms: 1 }
+          : { shops: 1 };
+    await assertUnitCapacity(req.organizationId, requestedUnits);
+
     const beds =
       normalizedPropertyType === "bed"
-        ? []
+        ? Array.from({ length: normalizedBedCount }, (_, index) => ({
+            bedNo: `B${index + 1}`,
+            bedCategory: normalizeText(bedCategory || "Standard") || "Standard",
+            price: normalizedPrice,
+          }))
         : [
             {
               bedNo: normalizedPropertyType === "shop" ? "SHOP-1" : "ROOM-1",
               bedCategory: "Primary",
-              price: null,
+              price: normalizedPrice,
             },
           ];
 
-    const room = await Room.create({
+    const room = await Room.create(scopedCreate(req, {
       propertyType: normalizedPropertyType,
       category: cat,
       hasWing: normalizedHasWing,
@@ -272,10 +404,19 @@ router.post("/", async (req, res) => {
       floorNo: flr,
       flatType: normalizedFlatType,
       roomNo: rno,
+      meterNo: normalizedMeterNo,
+      lastMeterReading: normalizedLastMeterReading,
       beds,
-    });
+    }));
     return res.status(201).json(room);
   } catch (err) {
+    if (err?.code === "UNIT_LIMIT_EXCEEDED") {
+      return res.status(err.status || 403).json({
+        message: err.message,
+        code: err.code,
+        details: err.details,
+      });
+    }
     // duplicate key error for compound index
     if (err?.code === 11000) {
       return res.status(400).json({ message: "Unit already exists in this location" });
@@ -285,6 +426,62 @@ router.post("/", async (req, res) => {
 });
 
 // ✅ Add bed by roomId
+router.post("/:roomId/beds", async (req, res) => {
+  try {
+    const count = Number(req.body?.count);
+    const bedCategory = normalizeText(req.body?.bedCategory || "Standard") || "Standard";
+    const price = Number(req.body?.price);
+
+    if (!Number.isInteger(count) || count < 1) {
+      return res.status(400).json({ message: "count must be a positive integer" });
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      return res.status(400).json({ message: "Invalid monthly price" });
+    }
+
+    const room = await Room.findOne(scopedQuery(req, { _id: req.params.roomId }));
+    if (!room) return res.status(404).json({ message: "Room not found" });
+    if (normalizePropertyType(room.propertyType) !== "bed") {
+      return res.status(400).json({ message: "Beds can be added only to bed-wise rooms" });
+    }
+
+    await assertUnitCapacity(req.organizationId, { beds: count });
+
+    const usedNumbers = new Set(
+      (room.beds || [])
+        .map((bed) => /^B(\d+)$/i.exec(String(bed.bedNo || "")))
+        .filter(Boolean)
+        .map((match) => Number(match[1]))
+    );
+    const added = [];
+    let candidate = 1;
+    while (added.length < count) {
+      if (!usedNumbers.has(candidate)) {
+        const bed = { bedNo: `B${candidate}`, bedCategory, price };
+        room.beds.push(bed);
+        added.push(bed);
+        usedNumbers.add(candidate);
+      }
+      candidate += 1;
+    }
+
+    await room.save();
+    const quota = await getUnitQuota(req.organizationId);
+    res.status(201).json({
+      message: `${added.length} beds added successfully`,
+      room,
+      added,
+      quota,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || "Internal server error",
+      code: err.code,
+      details: err.details,
+    });
+  }
+});
+
 router.post("/:roomId/bed", async (req, res) => {
   const { roomId } = req.params;
   let { bedNo, bedCategory, price } = req.body || {};
@@ -293,7 +490,7 @@ router.post("/:roomId/bed", async (req, res) => {
     if (!bedNo) return res.status(400).json({ message: "Missing bedNo" });
 
     const room = await Room.findById(roomId);
-    if (!room) return res.status(404).json({ message: "Room not found" });
+    if (!ensureScopedDocument(req, room, res, "Room not found")) return;
     if (normalizePropertyType(room.propertyType) !== "bed") {
       return res.status(400).json({ message: "Additional beds are allowed only for bed-wise properties" });
     }
@@ -303,8 +500,10 @@ router.post("/:roomId/bed", async (req, res) => {
     );
     if (exists) return res.status(400).json({ message: "Bed already exists in this room" });
 
-    bedNo = String(bedNo).trim();
-    bedCategory = bedCategory ? String(bedCategory).trim() : "";
+    await assertUnitCapacity(req.organizationId, { beds: 1 });
+
+    bedNo = normalizeIdentifier(bedNo);
+    bedCategory = bedCategory ? normalizeText(bedCategory) : "";
 
     if (price === undefined || price === "") price = null;
     else {
@@ -317,7 +516,11 @@ router.post("/:roomId/bed", async (req, res) => {
 
     res.json({ message: "Bed added successfully", room });
   } catch (err) {
-    res.status(500).json({ message: "Internal server error" });
+    res.status(err.status || 500).json({
+      message: err.message || "Internal server error",
+      code: err.code,
+      details: err.details,
+    });
   }
 });
 
@@ -355,7 +558,7 @@ router.put("/:roomId/bed/:bedNo", async (req, res) => {
 
   try {
     const room = await Room.findById(roomId);
-    if (!room) return res.status(404).json({ message: "Room not found" });
+    if (!ensureScopedDocument(req, room, res, "Room not found")) return;
 
     const bed = room.beds.find(
       (b) =>
@@ -389,38 +592,63 @@ router.put("/:roomId/bed/:bedNo", async (req, res) => {
 });
 
 // ✅ Delete bed by roomId
-router.delete("/:roomNo/bed/:bedNo", async (req, res) => {
-  const { roomNo, bedNo } = req.params;
+router.delete("/:roomId/bed/:bedNo", async (req, res) => {
+  const { roomId, bedNo } = req.params;
 
   try {
-    const room = await Room.findOne({ roomNo: String(roomNo) });
-    if (!room) {
-      return res.status(404).json({ message: "Room not found" });
-    }
-    if (normalizePropertyType(room.propertyType) !== "bed" && (room.beds || []).length <= 1) {
-      return res.status(400).json({ message: "Primary room/shop slot cannot be deleted" });
+    const room = await Room.findOne(scopedQuery(req, { _id: roomId }));
+    if (!ensureScopedDocument(req, room, res, "Room not found")) return;
+
+    if (normalizePropertyType(room.propertyType) !== "bed") {
+      return res.status(400).json({ message: "Beds can be deleted only from hostel rooms" });
     }
 
-    const result = await Room.updateOne(
-      { roomNo: String(roomNo) },
-      {
-        $pull: {
-          beds: { bedNo: String(bedNo) } // if bedNo stored as string
-          // beds: { bedNo: Number(bedNo) } // if bedNo stored as number
-        },
-      }
+    const existingBed = (room.beds || []).find(
+      (bed) => String(bed.bedNo || "").trim().toLowerCase() === String(bedNo || "").trim().toLowerCase()
     );
 
-    if (result.matchedCount === 0)
-      return res.status(404).json({ message: "Room not found" });
-
-    if (result.modifiedCount === 0)
+    if (!existingBed) {
       return res.status(404).json({ message: "Bed not found" });
+    }
 
-    const updatedRoom = await Room.findOne({ roomNo: String(roomNo) });
-    return res.json({ message: "Bed deleted successfully", room: updatedRoom });
+    const activeTenant = await Form.findOne(scopedQuery(req, {
+      propertyType: "bed",
+      bedNo: String(existingBed.bedNo),
+      leaveDate: { $in: [null, ""] },
+      $or: [
+        { roomId: String(room._id) },
+        { roomNo: String(room.roomNo || "").trim() },
+      ],
+    })).lean();
+
+    if (activeTenant) {
+      return res.status(400).json({
+        message: "Cannot delete this bed because a tenant is assigned to it",
+      });
+    }
+
+    room.beds = (room.beds || []).filter(
+      (bed) =>
+        String(bed.bedNo || "").trim().toLowerCase() !==
+        String(existingBed.bedNo || "").trim().toLowerCase()
+    );
+
+    await room.save();
+
+    const updatedRoom = await Room.findOne(scopedQuery(req, { _id: roomId })).lean();
+    return res.json({
+      message: "Bed deleted successfully",
+      room: updatedRoom,
+      quota: await getUnitQuota(req.organizationId),
+    });
   } catch (err) {
-    return res.status(500).json({ message: "Internal server error", error: err.message });
+    if (err?.name === "CastError") {
+      return res.status(404).json({ message: "Room not found" });
+    }
+    return res.status(err.status || 500).json({
+      message: err.message || "Internal server error",
+      code: err.code,
+    });
   }
 });
 
@@ -429,14 +657,9 @@ router.delete("/:roomId", async (req, res) => {
 
   try {
     const room = await Room.findById(roomId);
-    if (!room) {
-      return res.status(404).json({ message: "Room not found" });
-    }
+    if (!ensureScopedDocument(req, room, res, "Room not found")) return;
 
-    const activeTenant = await Form.findOne({
-      roomNo: String(room.roomNo || "").trim(),
-      leaveDate: { $in: [null, ""] },
-    }).lean();
+    const activeTenant = await Form.findOne(scopedQuery(req, activeTenantQueryForUnit(room))).lean();
 
     if (activeTenant) {
       return res.status(400).json({
@@ -456,7 +679,7 @@ router.delete("/:roomId", async (req, res) => {
 // ✅ PUT /api/rooms/:roomId  -> update room category (and optionally floorNo/roomNo later)
 router.put("/:roomId", async (req, res) => {
   const { roomId } = req.params;
-  const { category, propertyType, floorNo, roomNo, hasWing, wingName, flatType } = req.body || {};
+  const { category, propertyType, floorNo, roomNo, hasWing, wingName, flatType, meterNo, lastMeterReading } = req.body || {};
 
   try {
     if (
@@ -466,23 +689,33 @@ router.put("/:roomId", async (req, res) => {
       roomNo === undefined &&
       hasWing === undefined &&
       wingName === undefined &&
-      flatType === undefined
+      flatType === undefined &&
+      meterNo === undefined &&
+      lastMeterReading === undefined
     ) {
       return res.status(400).json({ message: "At least one room field is required" });
     }
 
+    const currentRoom = await Room.findOne(scopedQuery(req, { _id: roomId }));
+    if (!currentRoom) return res.status(404).json({ message: "Room not found" });
+    if (
+      propertyType !== undefined &&
+      normalizePropertyType(propertyType) !== normalizePropertyType(currentRoom.propertyType)
+    ) {
+      return res.status(400).json({
+        message: "Unit type cannot be changed after creation",
+      });
+    }
+
     const update = {};
-    if (category && String(category).trim()) {
-      update.category = String(category).trim();
+    if (category && normalizeText(category)) {
+      update.category = normalizeText(category);
     }
-    if (propertyType !== undefined) {
-      update.propertyType = normalizePropertyType(propertyType);
+    if (floorNo !== undefined && normalizeText(floorNo)) {
+      update.floorNo = normalizeText(floorNo);
     }
-    if (floorNo !== undefined && String(floorNo).trim()) {
-      update.floorNo = String(floorNo).trim();
-    }
-    if (roomNo !== undefined && String(roomNo).trim()) {
-      update.roomNo = String(roomNo).trim();
+    if (roomNo !== undefined && normalizeIdentifier(roomNo)) {
+      update.roomNo = normalizeIdentifier(roomNo);
     }
     if (hasWing !== undefined) {
       update.hasWing = Boolean(hasWing);
@@ -491,15 +724,54 @@ router.put("/:roomId", async (req, res) => {
       }
     }
     if (wingName !== undefined) {
-      update.wingName = String(wingName || "").trim();
+      update.wingName = normalizeText(wingName);
     }
     if (flatType !== undefined) {
-      update.flatType = String(flatType || "").trim();
+      update.flatType = normalizeText(flatType);
+    }
+    if (meterNo !== undefined) {
+      update.meterNo = normalizeIdentifier(meterNo);
+    }
+    if (lastMeterReading !== undefined) {
+      if (lastMeterReading === "" || lastMeterReading === null) {
+        update.lastMeterReading = null;
+      } else {
+        const reading = Number(lastMeterReading);
+        if (!Number.isFinite(reading) || reading < 0) {
+          return res.status(400).json({ message: "Invalid meter reading" });
+        }
+        update.lastMeterReading = reading;
+      }
     }
 
-    const updated = await Room.findByIdAndUpdate(
-      roomId,
-      { $set: update },
+    const nextLocation = {
+      propertyType: normalizePropertyType(currentRoom.propertyType),
+      category: update.category ?? currentRoom.category,
+      floorNo: update.floorNo ?? currentRoom.floorNo,
+      roomNo: update.roomNo ?? currentRoom.roomNo,
+      wingName: update.hasWing === false ? "" : update.wingName ?? currentRoom.wingName ?? "",
+    };
+    const duplicateUnit = await Room.findOne(scopedQuery(req, {
+      ...nextLocation,
+      _id: { $ne: roomId },
+    })).collation({ locale: "en", strength: 2 });
+    if (duplicateUnit) {
+      return res.status(400).json({ message: "Unit already exists in this location" });
+    }
+
+    if (update.meterNo) {
+      const duplicateMeter = await Room.findOne(scopedQuery(req, {
+        meterNo: update.meterNo,
+        _id: { $ne: roomId },
+      })).collation({ locale: "en", strength: 2 });
+      if (duplicateMeter) {
+        return res.status(400).json({ message: "Meter number already exists for another unit" });
+      }
+    }
+
+    const updated = await Room.findOneAndUpdate(
+      scopedQuery(req, { _id: roomId }),
+      { $set: scopedUpdate(req, update) },
       { new: true, runValidators: true }
     );
 
@@ -530,7 +802,7 @@ router.patch("/:roomId/bed/:bedNo", async (req, res) => {
     }
 
     const room = await Room.findOneAndUpdate(
-      { _id: roomId, "beds.bedNo": String(bedNo) },
+      scopedQuery(req, { _id: roomId, "beds.bedNo": String(bedNo) }),
       { $set: update },
       { new: true }
     );

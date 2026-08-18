@@ -65,6 +65,7 @@ const mongoose = require("mongoose");
 const LeaveRequest = require("../models/LeaveRequest"); // make sure path matches
 const Notification = require("../models/Notification");
 const Form = require("../models/formModels");
+const { scopedQuery } = require("../utils/organizationScope");
 
 exports.approveLeave = async (req, res) => {
   try {
@@ -73,28 +74,28 @@ exports.approveLeave = async (req, res) => {
     }
 
     const { id } = req.params; // LeaveRequest _id
-    const leave = await LeaveRequest.findByIdAndUpdate(
-      id,
+    const leave = await LeaveRequest.findOneAndUpdate(
+      scopedQuery(req, { _id: id }),
       { status: "approved" },
       { new: true }
     );
     if (!leave) return res.status(404).json({ error: "Leave not found" });
 
     // ✅ Apply to tenant so it shows in your Actions column
-    await Form.findByIdAndUpdate(
-      leave.tenant,
+    await Form.findOneAndUpdate(
+      scopedQuery(req, { _id: leave.tenant }),
       { leaveDate: leave.date },
       { new: true }
     );
 
     // ✅ Flip ALL related notifications (if multiple were created)
     await Notification.updateMany(
-      {
+      scopedQuery(req, {
         type: "leave_request",
         tenantId: leave.tenant,
         leaveDate: leave.date,          // helps target the right ones
         status: "pending",
-      },
+      }),
       { status: "approved", read: true }
     );
 
@@ -112,20 +113,20 @@ exports.rejectLeave = async (req, res) => {
     }
 
     const { id } = req.params;
-    const leave = await LeaveRequest.findByIdAndUpdate(
-      id,
+    const leave = await LeaveRequest.findOneAndUpdate(
+      scopedQuery(req, { _id: id }),
       { status: "rejected" },
       { new: true }
     );
     if (!leave) return res.status(404).json({ error: "Leave not found" });
 
     await Notification.updateMany(
-      {
+      scopedQuery(req, {
         type: "leave_request",
         tenantId: leave.tenant,
         leaveDate: leave.date,
         status: "pending",
-      },
+      }),
       { status: "rejected", read: true }
     );
 
