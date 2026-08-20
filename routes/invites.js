@@ -12,7 +12,6 @@ const {
   validateInvite,
 } = require("../controllers/invites");
 const Organization = require("../models/Organization");
-const { sendAdmissionSms } = require("../services/smsService");
 const router = express.Router();
 
 function propertyTypeFromTenant(tenant = {}) {
@@ -23,6 +22,34 @@ function propertyTypeFromTenant(tenant = {}) {
   if (bedNo === "SHOP-1") return "shop";
   if (bedNo === "ROOM-1") return "room";
   return "bed";
+}
+
+function normalizeDocumentRelation(value) {
+  const relation = String(value || "").trim().toLowerCase().replace(/[.\-_]+/g, " ").replace(/\s+/g, " ");
+  const aliases = {
+    self: "self aadhaar card",
+    aadhaar: "self aadhaar card",
+    "self aadhaar": "self aadhaar card",
+    "tenant aadhaar": "self aadhaar card",
+    "tenant aadhaar card": "self aadhaar card",
+    "parent/relative aadhaar": "parent aadhaar card",
+    "parent relative aadhaar": "parent aadhaar card",
+    "partner aadhaar": "partner aadhaar card",
+    "tenant photograph": "tenant photo",
+    "tenant photograph (selfie)": "tenant photograph (selfie)",
+    photo: "tenant photo",
+  };
+  return aliases[relation] || relation;
+}
+
+function canonicalDocumentRelation(value) {
+  const relation = normalizeDocumentRelation(value);
+  if (relation === "self aadhaar card") return "Self Aadhaar Card";
+  if (relation === "parent aadhaar card") return "Parent Aadhaar Card";
+  if (relation === "partner aadhaar card") return "Partner Aadhaar Card";
+  if (relation === "tenant photograph (selfie)") return "Tenant Photograph (Selfie)";
+  if (relation === "tenant photo") return "Tenant Photo";
+  return String(value || "").trim();
 }
 
 async function inferPropertyTypeFromRoom(tenant = {}, organizationId) {
@@ -157,7 +184,7 @@ async function submitInviteForm(req, res) {
 
     const documents = Array.isArray(incoming.documents) ? incoming.documents : [];
     const existingDocuments = Array.isArray(existingForm.documents) ? existingForm.documents : [];
-    const relations = new Set([...existingDocuments, ...documents].map((document) => String(document?.relation || "").toLowerCase()));
+    const relations = new Set([...existingDocuments, ...documents].map((document) => normalizeDocumentRelation(document?.relation)));
     const requiredDocumentRelations = isResidentialRoom
       ? ["self aadhaar card", "partner aadhaar card", "tenant photograph (selfie)"]
       : isShop
@@ -170,14 +197,21 @@ async function submitInviteForm(req, res) {
     }
 
     if (documents.length) {
+      if (documents.some((document) => !String(document?.url || document?.filePath || document?.fileId || "").trim())) {
+        await releaseInvite();
+        return res.status(400).json({ ok: false, message: "Each tenant document must finish uploading before submission" });
+      }
       const replacedRelations = new Set(
-        documents.map((document) => String(document?.relation || "").trim().toLowerCase()).filter(Boolean)
+        documents.map((document) => normalizeDocumentRelation(document?.relation)).filter(Boolean)
       );
       incoming.documents = [
         ...existingDocuments.filter(
-          (document) => !replacedRelations.has(String(document?.relation || "").trim().toLowerCase())
+          (document) => !replacedRelations.has(normalizeDocumentRelation(document?.relation))
         ),
-        ...documents,
+        ...documents.map((document) => ({
+          ...document,
+          relation: canonicalDocumentRelation(document?.relation),
+        })),
       ];
     } else {
       delete incoming.documents;
@@ -194,13 +228,6 @@ async function submitInviteForm(req, res) {
       claimedInvite = null;
       return res.status(404).json({ ok: false, message: "Tenant draft not found" });
     }
-const organization = updated.organizationId
-  ? await Organization.findById(updated.organizationId).lean()
-  : null;
-
-sendAdmissionSms(updated, organization || {}).catch((err) =>
-  console.error("Admission SMS failed:", err.message)
-);
     claimedInvite = null;
     return res.json({ ok: true, message: "Saved", form: updated });
   } catch (err) {

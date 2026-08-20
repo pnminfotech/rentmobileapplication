@@ -41,7 +41,6 @@ const upload = multer({
 });
 
 /* ================== Helpers ================== */
-const TARGET = 10 * 1024; // 10 KB (your choice)
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png"]);
 
@@ -57,30 +56,10 @@ function isAllowedImageFile(file) {
 }
 
 async function compressUnder10KB(buf) {
-  let q = 80, w = null;
-  let out = await sharp(buf).webp({ quality: q }).toBuffer();
-
-  while (out.length > TARGET && (q > 30 || w === null || w > 200)) {
-    if (q > 30) q -= 10;
-    else {
-      const meta = await sharp(buf).metadata();
-      w = w || meta.width || 800;
-      w = Math.max(200, Math.floor(w * 0.8));
-    }
-
-    const p = sharp(buf);
-    if (w) p.resize({ width: w, withoutEnlargement: true });
-    out = await p.webp({ quality: q }).toBuffer();
-  }
-
-  if (out.length > TARGET) {
-    out = await sharp(buf)
-      .resize({ width: 200, withoutEnlargement: true })
-      .webp({ quality: 25 })
-      .toBuffer();
-  }
-
-  return out;
+  return sharp(buf)
+    .resize({ width: 1600, withoutEnlargement: true })
+    .webp({ quality: 72 })
+    .toBuffer();
 }
 
 function cleanMoney(v) {
@@ -193,6 +172,11 @@ router.post(
         req.files?.parentAadhar?.[0],
         req.files?.photo?.[0],
       ].filter(Boolean);
+      if (!allFiles.length) {
+        return res.status(400).json({
+          message: "No document files were received. Please select the documents again and retry.",
+        });
+      }
       const invalidFiles = allFiles.filter((file) => !isAllowedImageFile(file));
       if (invalidFiles.length) {
         return res.status(400).json({
@@ -236,12 +220,12 @@ router.post(
         const up = await imagekit.upload({
           file: uploadBuffer,
           fileName: uploadName,
-          folder: "/mutakegirlshostel/tenant_docs",
+          folder: "/rent-management-mobile-app/tenant_docs",
           useUniqueFileName: true,
         });
 
         // ✅ EXACTLY HERE your doc.url becomes:
-        // "https://ik.imagekit.io/<id>/mutakegirlshostel/tenant_docs/....webp"
+        // "https://ik.imagekit.io/<id>/rent-management-mobile-app/tenant_docs/....webp"
         docsToAdd.push({
           fileName: file.originalname,
           relation: relationLabel,
@@ -253,9 +237,11 @@ router.post(
         });
       }
 
-      await uploadOne(req.files?.selfAadhar?.[0], "Self Aadhaar Card");
-      await uploadOne(req.files?.parentAadhar?.[0], "Parent Aadhaar Card");
-      await uploadOne(req.files?.photo?.[0], "Tenant Photo");
+      await Promise.all([
+        uploadOne(req.files?.selfAadhar?.[0], "Self Aadhaar Card"),
+        uploadOne(req.files?.parentAadhar?.[0], "Parent Aadhaar Card"),
+        uploadOne(req.files?.photo?.[0], "Tenant Photo"),
+      ]);
 
       let savedForm;
 

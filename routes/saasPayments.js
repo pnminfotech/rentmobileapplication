@@ -255,6 +255,111 @@ async function handlePhonePeCheckoutPage(req, res) {
   }
 }
 
+function formatReturnDate(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "-"
+    : date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+async function handlePhonePeReturn(req, res) {
+  try {
+    const transactionId = req.query?.transactionId || req.query?.billingTransactionId;
+    const merchantOrderId =
+      req.query?.merchantOrderId || req.query?.merchantTransactionId || req.query?.orderId;
+    const query = transactionId
+      ? { _id: transactionId }
+      : {
+          $or: [
+            { merchantTransactionId: merchantOrderId },
+            { "responsePayload.merchantOrderId": merchantOrderId },
+            { "responsePayload.merchantTransactionId": merchantOrderId },
+          ],
+        };
+
+    if (!transactionId && !merchantOrderId) {
+      return res.status(400).send("Payment reference not found");
+    }
+
+    const transaction = await BillingTransaction.findOne(query);
+    if (!transaction) return res.status(404).send("Payment transaction not found");
+
+    const provider = String(transaction.responsePayload?.provider || transaction.provider || "").toLowerCase();
+    if (provider === "phonepe" && ["created", "pending"].includes(transaction.status)) {
+      try {
+        const providerStatus = await checkPhonePeOrderStatus(
+          transaction.responsePayload?.merchantOrderId ||
+            transaction.responsePayload?.merchantTransactionId ||
+            transaction.merchantTransactionId
+        );
+        transaction.status = providerStatus.status;
+        transaction.callbackPayload = {
+          ...(transaction.callbackPayload || {}),
+          returnStatusPoll: providerStatus,
+          returnedAt: new Date(),
+        };
+        await transaction.save();
+        if (providerStatus.status === "success") {
+          await activatePaidSubscription(transaction, {
+            source: "phonepe-return",
+            status: providerStatus.status,
+            providerStatus,
+          });
+        }
+      } catch (pollError) {
+        console.error("phonepe return status check error:", pollError);
+      }
+    }
+
+    const [subscription, organization] = await Promise.all([
+      Subscription.findById(transaction.subscriptionId).lean(),
+      Organization.findById(transaction.organizationId).lean(),
+    ]);
+    const status = String(transaction.status || "pending").toLowerCase();
+    const title = status === "success" ? "Payment verified" : status === "failed" ? "Payment failed" : "Payment pending";
+    const message = status === "success"
+      ? "Your subscription is active. Please login to start using EazyRent."
+      : status === "failed"
+        ? "The payment was not completed. Please login and try again."
+        : "We received the payment response, but confirmation is still pending. Please login shortly to check your subscription.";
+    const loginUrl = process.env.FRONTEND_LOGIN_URL || "rentmanagementmobile://login";
+    const rows = [
+      ["Status", status.toUpperCase()],
+      ["Organization", organization?.name],
+      ["Purchase amount", `${transaction.amount || 0} ${transaction.currency || "INR"}`],
+      ["Subscription", `${subscription?.durationMonths || "-"} months`],
+      ["Start date", formatReturnDate(subscription?.startDate)],
+      ["Expiry date", formatReturnDate(subscription?.endDate)],
+      ["Paid at", formatReturnDate(transaction.paidAt)],
+      ["Transaction ID", transaction._id],
+    ]
+      .map(([label, value]) => `<div class="row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "-")}</strong></div>`)
+      .join("");
+
+    return res.status(200).send(`<!doctype html>
+<html><head><title>${escapeHtml(title)}</title><meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;font-family:Arial,sans-serif;background:#f4f7f6;color:#16211d}
+main{width:min(520px,100%);padding:28px;box-sizing:border-box;border:1px solid #d8e5df;border-radius:16px;background:#fff;box-shadow:0 12px 32px rgba(22,33,29,.1)}
+.icon{font-size:42px}.success{color:#16845b}.failed{color:#c0392b}.pending{color:#a66a00}h1{margin:8px 0;color:#16211d;font-size:28px}p{color:#5d6b65;line-height:1.5}.details{margin:22px 0;border-top:1px solid #e4ece8}.row{display:flex;justify-content:space-between;gap:20px;padding:12px 0;border-bottom:1px solid #e4ece8;font-size:14px}.row span{color:#68766f}.row strong{text-align:right;overflow-wrap:anywhere}a{display:block;padding:14px;border-radius:9px;background:#167653;color:#fff;text-align:center;text-decoration:none;font-weight:700}
+</style></head><body><main><div class="icon ${escapeHtml(status)}">${status === "success" ? "&#10003;" : status === "failed" ? "&#10007;" : "&#8987;"}</div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><div class="details">${rows}</div><a id="loginButton" href="${escapeHtml(loginUrl)}">Login to EazyRent</a><p id="loginHint" hidden>Open this page on the device where EazyRent is installed, then tap the button again.</p></main><script>
+const loginButton = document.getElementById("loginButton");
+const loginHint = document.getElementById("loginHint");
+loginButton.addEventListener("click", function (event) {
+  event.preventDefault();
+  window.location.assign(${JSON.stringify(loginUrl)});
+  setTimeout(function () {
+    loginHint.hidden = false;
+  }, 1500);
+});
+</script></body></html>`);
+  } catch (err) {
+    console.error("phonepe return page error:", err);
+    return res.status(500).send("Unable to verify payment");
+  }
+}
+
 router.post("/create", requireSystemAuth, async (req, res) => {
   try {
     const transactionId = req.body?.transactionId || req.body?.billingTransactionId;
@@ -285,6 +390,7 @@ router.post("/create", requireSystemAuth, async (req, res) => {
 
     const intent = await createPaymentIntent({ transaction, organization, subscription });
 
+    transaction.merchantTransactionId = intent.merchantTransactionId || transaction.merchantTransactionId;
     transaction.status = intent.status || "pending";
     transaction.requestPayload = {
       ...(transaction.requestPayload || {}),
@@ -301,7 +407,9 @@ router.post("/create", requireSystemAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("create saas payment error:", err);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({
+      message: err.message || "Unable to create payment. Please try again or contact support.",
+    });
   }
 });
 
@@ -493,3 +601,4 @@ router.get(
 module.exports = router;
 module.exports.handlePhonePeWebhook = handlePhonePeWebhook;
 module.exports.handlePhonePeCheckoutPage = handlePhonePeCheckoutPage;
+module.exports.handlePhonePeReturn = handlePhonePeReturn;

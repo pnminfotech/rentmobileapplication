@@ -1695,7 +1695,26 @@ router.get(
         { $match: { status: "success" } },
         { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
       ]),
-      BillingTransaction.countDocuments({ status: { $in: ["created", "pending"] } }),
+      BillingTransaction.aggregate([
+        {
+          $match: {
+            $expr: {
+              $in: [
+                { $toLower: { $ifNull: ["$status", ""] } },
+                ["created", "pending", "pending_payment"],
+              ],
+            },
+          },
+        },
+        { $count: "count" },
+      ]),
+      Subscription.countDocuments({
+        status: "pending_payment",
+        $or: [
+          { latestTransactionId: null },
+          { latestTransactionId: { $exists: false } },
+        ],
+      }),
       Organization.find()
         .sort({ createdAt: -1 })
         .limit(8)
@@ -1719,7 +1738,7 @@ router.get(
       revenue: {
         successfulAmount: successfulPayments[0]?.total || 0,
         successfulCount: successfulPayments[0]?.count || 0,
-        pendingTransactions: pendingPayments,
+        pendingTransactions: (pendingPayments[0]?.count || 0) + pendingSubscriptions,
       },
       latestOrganizations,
     });

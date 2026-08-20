@@ -51,9 +51,14 @@ function phonePeConfig() {
   const statusBaseUrl = trimEndSlash(envValue("PHONEPE_STATUS_BASE_URL", payBaseUrl));
   const publicBase = envValue("PUBLIC_API_BASE_URL") || envValue("BACKEND_PUBLIC_URL");
   const redirectUrl =
-    envValue("PHONEPE_APP_RETURN_URL") ||
     envValue("PHONEPE_REDIRECT_URL") ||
+    envValue("PHONEPE_GATEWAY_REDIRECT_URL") ||
     (publicBase ? `${trimEndSlash(publicBase)}/api/phonepe/return` : "");
+  const appReturnUrl =
+    envValue("FRONTEND_PAYMENT_RETURN_URL") ||
+    envValue("PHONEPE_APP_RETURN_URL") ||
+    envValue("PHONEPE_DEEP_LINK_RETURN_URL") ||
+    "rentmanagementmobile://payment-result";
   const checkoutBaseUrl =
     envValue("PHONEPE_CHECKOUT_BASE_URL") ||
     publicBase ||
@@ -68,6 +73,7 @@ function phonePeConfig() {
     payBaseUrl,
     statusBaseUrl,
     redirectUrl,
+    appReturnUrl,
     checkoutBaseUrl: trimEndSlash(checkoutBaseUrl),
   };
 }
@@ -164,11 +170,9 @@ async function createPhonePePayment({ transaction, organization, subscription })
   const config = phonePeConfig();
   ensurePhonePeConfig(config);
   const token = await getPhonePeAccessToken();
-  const merchantOrderId =
-    transaction.merchantTransactionId ||
-    `TXN${Date.now()}${crypto.randomInt(1000, 9999)}`;
+  const merchantOrderId = `TXN${Date.now()}${crypto.randomInt(1000, 9999)}`;
   const amount = amountToPaise(transaction.amount);
-  const redirectUrl = appendUrlParams(config.redirectUrl, {
+  const gatewayRedirectUrl = appendUrlParams(config.redirectUrl, {
     transactionId: transaction._id,
     merchantOrderId,
   });
@@ -186,7 +190,7 @@ async function createPhonePePayment({ transaction, organization, subscription })
     paymentFlow: {
       type: "PG_CHECKOUT",
       message: `Subscription payment for ${organization.name || organization.businessName || "organization"}`,
-      merchantUrls: redirectUrl ? { redirectUrl } : undefined,
+      merchantUrls: gatewayRedirectUrl ? { redirectUrl: gatewayRedirectUrl } : undefined,
     },
   };
 

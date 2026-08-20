@@ -94,43 +94,7 @@ app.use("/api/saas", saasRoutes);
 app.use("/api/saas/payments", saasPaymentRoutes);
 app.get("/api/phonepe/checkout/:transactionId", saasPaymentRoutes.handlePhonePeCheckoutPage);
 app.post("/api/phonepe/webhook", saasPaymentRoutes.handlePhonePeWebhook);
-app.all("/api/phonepe/return", (req, res) => {
-  const configuredReturnUrl =
-    process.env.PHONEPE_APP_RETURN_URL ||
-    process.env.FRONTEND_PAYMENT_RETURN_URL ||
-    "rentmanagementmobile://login";
-  const returnUrl = new URL(configuredReturnUrl);
-  returnUrl.searchParams.set("payment", "submitted");
-  returnUrl.searchParams.set("source", "phonepe");
-  if (req.query?.merchantOrderId) returnUrl.searchParams.set("merchantOrderId", req.query.merchantOrderId);
-  if (req.query?.transactionId) returnUrl.searchParams.set("transactionId", req.query.transactionId);
-
-  const target = returnUrl.toString();
-  res
-    .status(200)
-    .send(`<!doctype html>
-<html>
-  <head>
-    <title>Payment Submitted</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta http-equiv="refresh" content="0;url=${target}" />
-    <style>
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif; background: #fff8f1; color: #111827; }
-      main { max-width: 420px; padding: 28px; text-align: center; }
-      a { display: inline-block; margin-top: 16px; padding: 12px 18px; border-radius: 8px; background: #7a365d; color: white; text-decoration: none; font-weight: 700; }
-      p { color: #6b7280; line-height: 1.5; }
-    </style>
-    <script>window.location.replace(${JSON.stringify(target)});</script>
-  </head>
-  <body>
-    <main>
-      <h2>Payment submitted</h2>
-      <p>Your payment response was received. Open EazyRent to confirm payment and activate your subscription.</p>
-      <a href="${target}">Open EazyRent</a>
-    </main>
-  </body>
-</html>`);
-});
+app.all("/api/phonepe/return", saasPaymentRoutes.handlePhonePeReturn);
 
 app.get("/.well-known/appspecific/com.chrome.devtools.json", (_req, res) =>
   res.sendStatus(204)

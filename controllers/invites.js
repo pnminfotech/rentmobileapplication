@@ -262,6 +262,8 @@ const Invite = require("../models/Invite");
 const Form = require("../models/formModels");
 const Counter = require("../models/counterModel"); // ✅ same counter you already use
 const Room = require("../models/Room");
+const Organization = require("../models/Organization");
+const { sendAdmissionSms } = require("../services/smsService");
 const { scopedCreate, scopedQuery } = require("../utils/organizationScope");
 
 const INVITE_VALIDITY_MS = 10 * 24 * 60 * 60 * 1000;
@@ -312,7 +314,7 @@ function getTenantIntakePath() {
     process.env.PUBLIC_URL ||
     process.env.FRONTEND_BASENAME ||
     process.env.APP_BASENAME ||
-    "/mutakegirlshostel"
+    "/rent-management-mobile-app"
   ).trim();
 
   const basePath =
@@ -658,7 +660,7 @@ exports.createInvite = async (req, res) => {
         firstRentStatus,
         firstRentMonth,
         paymentMode,
-        intakeStatus: "pending_tenant",
+        intakeStatus: "submitted",
         rents: initialRents,
       }));
     } catch (e) {
@@ -711,6 +713,13 @@ exports.createInvite = async (req, res) => {
       organizationId: req.organizationId || null,
       expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
     });
+
+    const organization = req.organizationId
+      ? await Organization.findById(req.organizationId).lean()
+      : null;
+    sendAdmissionSms(createdForm, organization || {}).catch((err) =>
+      console.error("Admission SMS failed:", err.message)
+    );
 
     return res.json({
       ok: true,
