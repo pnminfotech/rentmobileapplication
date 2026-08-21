@@ -53,10 +53,10 @@ function phonePeConfig() {
   const redirectUrl =
     envValue("PHONEPE_REDIRECT_URL") ||
     envValue("PHONEPE_GATEWAY_REDIRECT_URL") ||
-    (publicBase ? `${trimEndSlash(publicBase)}/api/phonepe/return` : "");
+    (publicBase ? `${trimEndSlash(publicBase)}/api/saas/payments/phonepe/return` : "");
   const appReturnUrl =
-    envValue("FRONTEND_PAYMENT_RETURN_URL") ||
     envValue("PHONEPE_APP_RETURN_URL") ||
+    envValue("FRONTEND_PAYMENT_RETURN_URL") ||
     envValue("PHONEPE_DEEP_LINK_RETURN_URL") ||
     "rentmanagementmobile://payment-result";
   const checkoutBaseUrl =

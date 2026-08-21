@@ -111,7 +111,8 @@ function meterBreakdownForBill(bill = {}, settings = {}) {
   }
 
   const extraUnits = Math.max(measuredUnits - includedUnits, 0);
-  const recoverableAmount = Math.max(extraUnits * ratePerUnit + (extraUnits > 0 ? fixedCharge : 0), 0);
+  const includedValue = includedUnits * ratePerUnit;
+  const recoverableAmount = Math.max(amount - includedValue, 0);
 
   return {
     recoverableAmount,
@@ -119,6 +120,7 @@ function meterBreakdownForBill(bill = {}, settings = {}) {
     consumedUnits,
     includedUnits,
     extraUnits,
+    includedValue,
     amount,
     usedFallback: false,
   };

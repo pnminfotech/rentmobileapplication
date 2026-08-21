@@ -228,6 +228,23 @@ async function submitInviteForm(req, res) {
       claimedInvite = null;
       return res.status(404).json({ ok: false, message: "Tenant draft not found" });
     }
+
+    const firstRentStatus = String(updated.firstRentStatus || "").trim();
+    const firstRentMonth = String(updated.firstRentMonth || "").trim();
+    if (firstRentStatus === "ADVANCE_PAID" && firstRentMonth) {
+      const rents = Array.isArray(updated.rents) ? updated.rents : [];
+      const hasFirstRent = rents.some((rent) => String(rent?.month || "").trim() === firstRentMonth);
+      if (!hasFirstRent) {
+        rents.unshift({
+          rentAmount: Number(updated.rentAmount || updated.baseRent || 0),
+          date: new Date(updated.joiningDate),
+          month: firstRentMonth,
+          paymentMode: updated.paymentMode || "Cash",
+        });
+        updated.rents = rents;
+        await updated.save();
+      }
+    }
     claimedInvite = null;
     return res.json({ ok: true, message: "Saved", form: updated });
   } catch (err) {
