@@ -818,9 +818,22 @@ router.post(
       }).sort({ createdAt: -1 });
 
       if (pendingExisting) {
-        return res.status(409).json({
-          message: "An upgrade request is already pending",
+        const payload = pendingExisting.requestPayload || {};
+        return res.json({
+          message: "An upgrade payment is already pending",
+          subscription: currentSubscription,
           transaction: pendingExisting,
+          upgrade: {
+            currentUnits: normalizeUnits(payload.currentUnits || currentSubscription.units || req.organization.unitAllocation || {}),
+            addedUnits: normalizeUnits(payload.addedUnits || {}),
+            newUnits: normalizeUnits(payload.newUnits || {}),
+            amount: pendingExisting.amount,
+            currency: pendingExisting.currency,
+            remainingDays: payload.remainingDays,
+            remainingMonthFactor: payload.remainingMonthFactor,
+            walletCoinsUsed: Number(pendingExisting.pricing?.walletCoinsUsed || 0),
+            originalAmount: Number(payload.originalAmount || pendingExisting.pricing?.subtotal || pendingExisting.amount || 0),
+          },
         });
       }
 
@@ -877,31 +890,10 @@ router.post(
       });
 
       await Promise.allSettled([
-        notifySuperadmins({
-          type: "renewal_request",
-          title: "Package upgrade requested",
-          message: `${req.organization.name} requested extra units for ${amount} ${currency}.`,
-          priority: "high",
-          entityType: "organization",
-          entityId: req.organization._id,
-          actionType: "subscription_upgrade_request",
-          actionUrl: `/superadmin/organization-detail?id=${req.organization._id}`,
-          expiresAt: addDays(currentSubscription.endDate, 30),
-          payload: {
-            organizationId: String(req.organizationId),
-            subscriptionId: String(currentSubscription._id),
-            transactionId: String(transaction._id),
-            addedUnits,
-            newUnits,
-            amount,
-            walletCoinsUsed: walletPricing.walletCoinsUsed,
-            currency,
-          },
-        }),
         notifyOrganization(req.organizationId, {
           type: "renewal_request",
-          title: "Upgrade request created",
-          message: `Your package upgrade request for ${amount} ${currency} has been sent to superadmin.`,
+          title: "Upgrade payment created",
+          message: `Complete payment of ${amount} ${currency} to activate your package upgrade.`,
           priority: "normal",
           entityType: "subscription",
           entityId: currentSubscription._id,

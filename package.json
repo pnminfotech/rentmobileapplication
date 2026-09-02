@@ -24,7 +24,8 @@
     "openai": "^5.22.0",
     "qrcode": "^1.5.4",
     "recharts": "^2.15.4",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"

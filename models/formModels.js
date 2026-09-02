@@ -103,6 +103,8 @@ const formSchema = new mongoose.Schema(
       index: true,
     },
     category: { type: String },
+    hasWing: { type: Boolean, default: false },
+    wingName: { type: String, default: "" },
     roomId: { type: String },
     roomNo: { type: String },
     depositAmount: { type: Number, required: true },

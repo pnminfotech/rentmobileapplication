@@ -1,15 +1,18 @@
 // routes/formRoutes.js
 const express = require("express");
 const router = express.Router();
+const XLSX = require("xlsx");
 
 // Models (used by a couple of inline routes)
 const Form = require("../models/formModels");
+const Organization = require("../models/Organization");
 const Room = require("../models/Room");
 const authAdmin = require("../middleware/adminAuth");
 const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
-const { scopedQuery } = require("../utils/organizationScope");
+const { scopedQuery, scopedCreate } = require("../utils/organizationScope");
 const { diffRecords, writeAuditLog } = require("../utils/auditLogger");
 const { resolveNotifications } = require("../services/notificationService");
+const { sendAdmissionSms } = require("../services/smsService");
 const {
   appendRentHistorySnapshot,
   getRentCycleForDate,
@@ -43,6 +46,7 @@ const {
   updateForm,
   saveForm, // kept/exported for legacy use (NOT bound to POST /forms)
   getAllForms,
+  assignNextSrNoAndUpdateCounter,
 } = require("../controllers/formController");
 
 const {
@@ -68,6 +72,217 @@ router.post("/forms", createWithOptionalInvite);
 
 // For UI to show next SrNo (server still assigns the real one)
 router.get("/forms/count", getNextSrNo);
+router.post("/forms/import", async (req, res) => {
+  try {
+    const propertyType = normalizeTenantImportPropertyType(req.body?.propertyType);
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) {
+      return res.status(400).json({ message: "Add at least one tenant row to import." });
+    }
+    if (rows.length > 2000) {
+      return res.status(400).json({ message: "You can import up to 2000 tenants at a time." });
+    }
+
+    const detectedSheetType = detectTenantImportSheetType(rows);
+    if (detectedSheetType && detectedSheetType !== propertyType) {
+      return res.status(400).json({
+        message: `This looks like a ${tenantImportTypeLabel(detectedSheetType)} sheet, but you are importing in ${tenantImportTypeLabel(propertyType)}.`,
+        error: `Please open the ${tenantImportTypeLabel(propertyType)} tab and upload the matching template only.`,
+      });
+    }
+
+    const [rooms, existingForms] = await Promise.all([
+      Room.find(scopedQuery(req, { propertyType })).lean(),
+      Form.find(scopedQuery(req)).lean(),
+    ]);
+
+    const units = rooms.map((room) => {
+      const beds = Array.isArray(room.beds) ? room.beds : [];
+      const primaryBed = beds[0] || {};
+      return {
+        room,
+        category: normalizeImportToken(room.category),
+        wingName: normalizeImportToken(room.wingName),
+        floorNo: normalizeImportToken(room.floorNo),
+        roomNo: normalizeImportToken(room.roomNo),
+        propertyType: normalizeTenantImportPropertyType(room.propertyType),
+        primaryBedNo: normalizeImportToken(
+          propertyType === "room" ? "ROOM-1" : propertyType === "shop" ? "SHOP-1" : primaryBed.bedNo
+        ),
+        beds: beds.map((bed) => ({
+          ...bed,
+          bedNo: normalizeImportToken(bed.bedNo),
+          price: Number(bed.price || 0),
+        })),
+      };
+    });
+
+    const activeForms = existingForms.filter(isImportTenantActive);
+
+    const occupiedSlots = new Set();
+    activeForms.forEach((tenant) => {
+      const key = slotKeyForImportTenant(tenant);
+      if (key) occupiedSlots.add(key);
+    });
+
+    const created = [];
+    const duplicates = [];
+    const invalidRows = [];
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const rowNumber = index + 2;
+      const row = rows[index];
+      const normalized = normalizeTenantImportRow(row, propertyType);
+
+      if (normalized.error) {
+        invalidRows.push({ rowNumber, name: normalized.name || "", reason: normalized.error });
+        continue;
+      }
+
+      const phoneKey = normalizeImportPhone(normalized.phoneNo);
+
+      const matchedUnit = findMatchingImportUnit(units, normalized, propertyType);
+      if (!matchedUnit) {
+        invalidRows.push({
+          rowNumber,
+          name: normalized.name,
+          reason: propertyType === "bed"
+            ? "Matching hostel room/bed was not found."
+            : propertyType === "room"
+            ? "Matching residential room was not found."
+            : "Matching commercial shop was not found.",
+        });
+        continue;
+      }
+
+      const resolvedBedNo = propertyType === "bed"
+        ? normalizeImportToken(normalized.bedNo)
+        : matchedUnit.primaryBedNo;
+      if (propertyType === "bed" && !resolvedBedNo) {
+        invalidRows.push({ rowNumber, name: normalized.name, reason: "Bed number is required for hostel imports." });
+        continue;
+      }
+      if (propertyType === "bed" && !matchedUnit.beds.some((bed) => bed.bedNo === resolvedBedNo)) {
+        invalidRows.push({ rowNumber, name: normalized.name, reason: `Bed ${normalized.bedNo || "-"} does not exist in room ${normalized.roomNo || "-"}.` });
+        continue;
+      }
+
+      const slotKey = buildImportSlotKey({
+        propertyType,
+        category: matchedUnit.room.category,
+        wingName: matchedUnit.room.wingName,
+        floorNo: matchedUnit.room.floorNo,
+        roomNo: matchedUnit.room.roomNo,
+        bedNo: resolvedBedNo,
+      });
+
+      if (slotKey && occupiedSlots.has(slotKey)) {
+        duplicates.push({
+          rowNumber,
+          name: normalized.name,
+          phoneNo: normalized.phoneNo,
+          reason: propertyType === "bed"
+            ? `Room ${matchedUnit.room.roomNo}, bed ${resolvedBedNo} is already occupied.`
+            : propertyType === "room"
+            ? `Residential room ${matchedUnit.room.roomNo} is already occupied.`
+            : `Shop ${matchedUnit.room.roomNo} is already occupied.`,
+        });
+        continue;
+      }
+
+      const selectedBed = propertyType === "bed"
+        ? matchedUnit.beds.find((bed) => bed.bedNo === resolvedBedNo)
+        : matchedUnit.beds[0] || { price: 0 };
+      const baseRent = Number.isFinite(Number(normalized.baseRent)) && Number(normalized.baseRent) > 0
+        ? Number(normalized.baseRent)
+        : Number(selectedBed?.price || 0);
+      const joiningDate = parseImportDateValue(normalized.joiningDate);
+
+      if (!joiningDate) {
+        invalidRows.push({ rowNumber, name: normalized.name, reason: "Joining date must be a valid date." });
+        continue;
+      }
+
+      const payload = scopedCreate(req, {
+        name: normalized.name,
+        joiningDate,
+        propertyType,
+        category: matchedUnit.room.category || "",
+        hasWing: Boolean(matchedUnit.room.hasWing && matchedUnit.room.wingName),
+        wingName: matchedUnit.room.wingName || "",
+        roomId: String(matchedUnit.room._id),
+        roomNo: matchedUnit.room.roomNo || "",
+        floorNo: matchedUnit.room.floorNo || "",
+        bedNo: resolvedBedNo,
+        depositAmount: Number(normalized.depositAmount || 0),
+        address: normalized.address,
+        pincode: normalized.pincode,
+        city: normalized.city,
+        state: normalized.state,
+        houseNo: normalized.houseNo,
+        nearbyPlace: normalized.nearbyPlace,
+        relativeAddress1: normalized.relativeAddress1,
+        phoneNo: Number(phoneKey),
+        relative1Relation: normalized.relative1Relation || "Self",
+        relative1Name: normalized.relative1Name,
+        relative1Phone: normalized.relative1Phone,
+        relative2Relation: normalized.relative2Relation || "Father",
+        relative2Name: normalized.relative2Name,
+        relative2Phone: normalized.relative2Phone,
+        familyMembers: propertyType === "room" ? Number(normalized.familyMembers || 0) : 0,
+        hasCanteen: propertyType === "bed" ? parseImportBoolean(normalized.hasCanteen) : false,
+        shopName: propertyType === "shop" ? normalized.shopName : "",
+        shopBusiness: propertyType === "shop" ? normalized.shopBusiness : "",
+        companyAddress: propertyType === "shop" ? normalized.companyAddress : "",
+        baseRent,
+        firstRentStatus: normalized.firstRentStatus,
+        intakeStatus: "submitted",
+        rents: [],
+        rentHistory: baseRent > 0 ? [{
+          effectiveFrom: joiningDate,
+          roomNo: matchedUnit.room.roomNo || "",
+          bedNo: resolvedBedNo,
+          baseRent,
+          rentAmount: baseRent,
+          source: "import",
+        }] : [],
+      });
+
+      const nextSrNo = await assignNextSrNoAndUpdateCounter();
+      payload.srNo = Number(nextSrNo);
+
+      const doc = await Form.create(payload);
+      const organization = doc.organizationId
+        ? await Organization.findById(doc.organizationId).lean()
+        : null;
+      sendAdmissionSms(doc, organization || {}).catch((err) =>
+        console.error("Import admission SMS failed:", err.message)
+      );
+      created.push({
+        _id: doc._id,
+        srNo: doc.srNo,
+        name: doc.name,
+        roomNo: doc.roomNo,
+        bedNo: doc.bedNo,
+      });
+      if (slotKey) occupiedSlots.add(slotKey);
+    }
+
+    return res.status(200).json({
+      propertyType,
+      createdCount: created.length,
+      duplicateCount: duplicates.length,
+      invalidCount: invalidRows.length,
+      skippedCount: duplicates.length + invalidRows.length,
+      created,
+      duplicates,
+      invalidRows,
+    });
+  } catch (error) {
+    console.error("Tenant import failed:", error);
+    return res.status(500).json({ message: "Unable to import tenants", error: error.message });
+  }
+});
 
 router.get("/forms/rent-dues", async (req, res) => {
   try {
@@ -152,6 +367,7 @@ router.get("/forms/rent-summary", async (req, res) => {
         lightBillPaid,
         lightBillBalance: Math.max(Number(lightBill.expected || 0) - lightBillPaid, 0),
         lightBillMode: lightBill.mode || "",
+        lightBillModeLabel: lightBill.modeLabel || "",
         lightBillBreakdown: lightBill.breakdown || [],
         totalExpected: expected + Number(canteen.expected || 0) + Number(lightBill.expected || 0),
         totalPaid: paid + canteenPaid + lightBillPaid,
@@ -635,6 +851,203 @@ function normalizePropertyType(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (raw === "room" || raw === "shop") return raw;
   return "bed";
+}
+
+function normalizeTenantImportPropertyType(value) {
+  return normalizePropertyType(value);
+}
+
+function normalizeImportToken(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function normalizeImportPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.slice(-10);
+}
+
+function parseImportBoolean(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return ["true", "yes", "y", "1"].includes(raw);
+}
+
+function normalizeImportFirstRentStatus(value) {
+  const raw = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["advance_paid", "advance", "advanced_paid", "advanced", "joining_cycle_paid"].includes(raw)) {
+    return "ADVANCE_PAID";
+  }
+  return "NOT_PAID";
+}
+
+function parseImportDateValue(value) {
+  if (!value && value !== 0) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (!parsed) return null;
+    return new Date(parsed.y, parsed.m - 1, parsed.d);
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const ymd = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (ymd) return new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]));
+
+  const dmy = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function importCellMap(row = {}) {
+  return Object.entries(row || {}).reduce((map, [key, value]) => {
+    const normalized = String(key || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (normalized && map[normalized] === undefined) map[normalized] = value;
+    return map;
+  }, {});
+}
+
+function importValue(row, aliases = []) {
+  const cells = importCellMap(row);
+  for (const alias of aliases) {
+    const key = String(alias || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (cells[key] !== undefined && cells[key] !== null && String(cells[key]).trim() !== "") return cells[key];
+  }
+  return "";
+}
+
+function normalizeTenantImportRow(row = {}, propertyType = "bed") {
+  const name = String(importValue(row, ["name", "tenant_name", "tenant name"])).trim();
+  const phoneNo = String(importValue(row, ["phoneNo", "phone", "mobile", "mobile_no", "mobile number"])).trim();
+  const joiningDate = importValue(row, ["joiningDate", "joining_date", "join_date", "join date"]);
+  const depositAmount = Number(importValue(row, ["depositAmount", "deposit", "deposit_amount"]) || 0);
+  const roomNo = String(importValue(row, ["roomNo", "room_no", "room number", "room", "shopNumber", "shop_number", "shop number", "shop"])).trim();
+  const category = String(importValue(row, ["category", "property", "property_name", "building"])).trim();
+  const wingName = String(importValue(row, ["wingName", "wing_name", "wing", "block", "block_name", "block name"])).trim();
+  const floorNo = String(importValue(row, ["floorNo", "floor_no", "floor", "floor number"])).trim();
+  const flatType = String(importValue(row, ["flatType", "flat_type", "flat type", "roomType", "room_type", "room type"])).trim();
+  const bedNo = propertyType === "bed"
+    ? String(importValue(row, ["bedNo", "bed_no", "bed", "bed number"])).trim()
+    : propertyType === "room"
+    ? "ROOM-1"
+    : "SHOP-1";
+
+  if (!name) return { error: "Tenant name is required." };
+  if (!/^\d{10}$/.test(normalizeImportPhone(phoneNo))) return { name, error: "A valid 10-digit phone number is required." };
+  if (!roomNo) return { name, error: propertyType === "bed" ? "Room number is required." : propertyType === "room" ? "Residential room number is required." : "Shop number is required." };
+  if (propertyType === "bed" && !bedNo) return { name, error: "Bed number is required for hostel import." };
+  if (!Number.isFinite(depositAmount) || depositAmount < 0) return { name, error: "Deposit amount must be 0 or more." };
+
+  return {
+    name,
+    phoneNo,
+    joiningDate,
+    depositAmount,
+    firstRentStatus: normalizeImportFirstRentStatus(
+      importValue(row, ["firstRentStatus", "first_rent_status", "paymentCycle", "payment_cycle", "payment cycle", "rent cycle", "cycle"])
+    ),
+    category,
+    wingName,
+    floorNo,
+    flatType,
+    roomNo,
+    bedNo,
+    address: String(importValue(row, ["address"])).trim(),
+    pincode: String(importValue(row, ["pincode", "pin_code", "pin code"])).trim(),
+    city: String(importValue(row, ["city"])).trim(),
+    state: String(importValue(row, ["state"])).trim(),
+    houseNo: String(importValue(row, ["houseNo", "house_no", "house number"])).trim(),
+    nearbyPlace: String(importValue(row, ["nearbyPlace", "nearby_place", "nearby landmark", "landmark"])).trim(),
+    relativeAddress1: String(importValue(row, ["relativeAddress1", "relative_address1", "relative address"])).trim(),
+    relative1Relation: String(importValue(row, ["relative1Relation", "relative1_relation", "relative 1 relation"])).trim(),
+    relative1Name: String(importValue(row, ["relative1Name", "relative1_name", "relative 1 name"])).trim(),
+    relative1Phone: String(importValue(row, ["relative1Phone", "relative1_phone", "relative 1 phone"])).trim(),
+    relative2Relation: String(importValue(row, ["relative2Relation", "relative2_relation", "relative 2 relation"])).trim(),
+    relative2Name: String(importValue(row, ["relative2Name", "relative2_name", "relative 2 name"])).trim(),
+    relative2Phone: String(importValue(row, ["relative2Phone", "relative2_phone", "relative 2 phone"])).trim(),
+    familyMembers: Number(importValue(row, ["familyMembers", "family_members", "family members"]) || 0),
+    hasCanteen: importValue(row, ["hasCanteen", "has_canteen", "canteen"]),
+    shopName: String(importValue(row, ["shopName", "shop_name", "shop name"])).trim(),
+    shopBusiness: String(importValue(row, ["shopBusiness", "shop_business", "shop business", "business"])).trim(),
+    companyAddress: String(importValue(row, ["companyAddress", "company_address", "company address"])).trim(),
+    baseRent: importValue(row, ["baseRent", "base_rent", "monthly_rent", "monthly rent", "rent"]),
+  };
+}
+
+function tenantImportTypeLabel(propertyType = "bed") {
+  const type = normalizeTenantImportPropertyType(propertyType);
+  if (type === "room") return "residential room";
+  if (type === "shop") return "commercial shop";
+  return "hostel bed";
+}
+
+function detectTenantImportSheetType(rows = []) {
+  const firstRow = Array.isArray(rows) ? rows.find((row) => row && typeof row === "object") : null;
+  if (!firstRow) return "";
+
+  const cells = importCellMap(firstRow);
+  const headers = Object.keys(cells);
+
+  const hasAny = (aliases = []) =>
+    aliases.some((alias) => headers.includes(String(alias || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "")));
+
+  if (hasAny(["bedNo", "bed_no", "bed", "bed number", "hasCanteen", "has_canteen", "canteen"])) {
+    return "bed";
+  }
+
+  if (hasAny(["shopName", "shop_name", "shop name", "shopBusiness", "shop_business", "shop business", "shopNumber", "shop_number", "shop number", "companyAddress", "company_address", "company address"])) {
+    return "shop";
+  }
+
+  if (hasAny(["flatType", "flat_type", "flat type", "roomType", "room_type", "room type", "familyMembers", "family_members", "family members"])) {
+    return "room";
+  }
+
+  return "";
+}
+
+function findMatchingImportUnit(units = [], row = {}, propertyType = "bed") {
+  const roomNo = normalizeImportToken(row.roomNo);
+  const category = normalizeImportToken(row.category);
+  const wingName = normalizeImportToken(row.wingName);
+  const floorNo = normalizeImportToken(row.floorNo);
+  const flatType = normalizeImportToken(row.flatType);
+  const filtered = units.filter((unit) => unit.propertyType === propertyType && unit.roomNo === roomNo);
+  if (!filtered.length) return null;
+  return filtered.find((unit) => (!category || unit.category === category) && (!wingName || unit.wingName === wingName) && (!floorNo || unit.floorNo === floorNo) && (propertyType !== "room" || !flatType || normalizeImportToken(unit.room.flatType) === flatType))
+    || filtered.find((unit) => (!category || unit.category === category) && (!wingName || unit.wingName === wingName))
+    || filtered.find((unit) => !category || unit.category === category)
+    || filtered[0];
+}
+
+function buildImportSlotKey({ propertyType, category, wingName, floorNo, roomNo, bedNo }) {
+  const type = normalizeTenantImportPropertyType(propertyType);
+  const roomToken = normalizeImportToken(roomNo);
+  if (!roomToken) return "";
+  const bedToken = type === "bed"
+    ? normalizeImportToken(bedNo)
+    : type === "room"
+    ? "ROOM-1"
+    : "SHOP-1";
+  return [type, normalizeImportToken(category), normalizeImportToken(wingName), normalizeImportToken(floorNo), roomToken, bedToken].join("|");
+}
+
+function slotKeyForImportTenant(tenant = {}) {
+  return buildImportSlotKey({
+    propertyType: tenantPropertyType(tenant),
+    category: tenant.category,
+    wingName: tenant.wingName,
+    floorNo: tenant.floorNo,
+    roomNo: tenant.roomNo,
+    bedNo: tenant.bedNo,
+  });
+}
+
+function isImportTenantActive(tenant = {}) {
+  if (tenant.intakeStatus === "pending_tenant") return false;
+  return isActiveTenant(tenant);
 }
 
 function tenantPropertyType(tenant = {}) {

@@ -25,6 +25,33 @@ const {
 
 const router = express.Router();
 
+function normalizeUnits(units = {}) {
+  return {
+    beds: Math.max(0, Number(units.beds || 0)),
+    rooms: Math.max(0, Number(units.rooms || 0)),
+    shops: Math.max(0, Number(units.shops || 0)),
+  };
+}
+
+function addUnits(currentUnits = {}, addedUnits = {}) {
+  const current = normalizeUnits(currentUnits);
+  const added = normalizeUnits(addedUnits);
+  return normalizeUnits({
+    beds: current.beds + added.beds,
+    rooms: current.rooms + added.rooms,
+    shops: current.shops + added.shops,
+  });
+}
+
+function businessTypeFromUnits(units = {}) {
+  const normalized = normalizeUnits(units);
+  const hasHostel = normalized.beds > 0 || normalized.rooms > 0;
+  const hasCommercial = normalized.shops > 0;
+  if (hasHostel && hasCommercial) return "mixed";
+  if (hasCommercial) return "commercial";
+  return "hostel";
+}
+
 async function resolveSubscriptionPaymentNotifications(subscription, previousSubscription) {
   if (!subscription?._id) return;
   await Promise.allSettled([
@@ -57,7 +84,86 @@ async function resolveSubscriptionPaymentNotifications(subscription, previousSub
   ]);
 }
 
+async function applyPaidSubscriptionUpgrade(transaction, payload = {}) {
+  const [subscription, organization] = await Promise.all([
+    Subscription.findById(transaction.subscriptionId),
+    Organization.findById(transaction.organizationId),
+  ]);
+
+  if (!subscription) {
+    const err = new Error("Subscription not found");
+    err.status = 404;
+    throw err;
+  }
+  if (!organization) {
+    const err = new Error("Organization not found");
+    err.status = 404;
+    throw err;
+  }
+
+  const requestPayload = transaction.requestPayload || {};
+  const currentUnits = normalizeUnits(subscription.units || organization.unitAllocation || {});
+  const addedUnits = normalizeUnits(requestPayload.addedUnits || {});
+  const newUnits = normalizeUnits(requestPayload.newUnits || addUnits(currentUnits, addedUnits));
+
+  transaction.status = "success";
+  transaction.callbackPayload = payload;
+  transaction.paidAt = transaction.paidAt || new Date();
+  transaction.responsePayload = {
+    ...(transaction.responsePayload || {}),
+    action: "subscription_upgrade_paid",
+    currentUnits,
+    addedUnits,
+    newUnits,
+  };
+  await transaction.save();
+
+  subscription.units = newUnits;
+  subscription.amount = Number(subscription.amount || 0) + Number(transaction.amount || 0);
+  subscription.latestTransactionId = transaction._id;
+  await subscription.save();
+
+  organization.unitAllocation = newUnits;
+  organization.businessType = businessTypeFromUnits(newUnits);
+  if (organization.status !== "active") organization.status = "active";
+  await organization.save();
+
+  await debitWalletUsageFromTransaction(transaction, "upgrade_discount_used");
+  await Promise.allSettled([
+    resolveNotifications({
+      organizationId: organization._id,
+      entityType: "subscription",
+      entityId: subscription._id,
+      actionType: "subscription_upgrade_payment_required",
+    }),
+    notifyOrganization(organization._id, {
+      type: "payment_confirmation",
+      title: "Package upgraded",
+      message: `Payment received. New package: ${newUnits.beds} beds, ${newUnits.rooms} rooms, ${newUnits.shops} shops.`,
+      priority: "high",
+      entityType: "subscription",
+      entityId: subscription._id,
+      actionType: "subscription_upgrade_success",
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      payload: {
+        subscriptionId: String(subscription._id),
+        transactionId: String(transaction._id),
+        addedUnits,
+        newUnits,
+        amount: transaction.amount,
+        currency: transaction.currency || "INR",
+      },
+    }),
+  ]);
+
+  return subscription;
+}
+
 async function activatePaidSubscription(transaction, payload = {}) {
+  if (transaction.requestPayload?.action === "subscription_upgrade") {
+    return applyPaidSubscriptionUpgrade(transaction, payload);
+  }
+
   const subscription = await Subscription.findById(transaction.subscriptionId);
   if (!subscription) {
     const err = new Error("Subscription not found");
@@ -193,7 +299,7 @@ async function handlePhonePeCheckoutPage(req, res) {
     const tokenUrl = resolveStoredPhonePeUrl(transaction);
     if (!tokenUrl) return res.status(404).send("PhonePe payment URL not found");
 
-    const returnUrl = process.env.PHONEPE_APP_RETURN_URL || process.env.FRONTEND_PAYMENT_RETURN_URL || "rentmanagementmobile://login";
+    const returnUrl = process.env.PHONEPE_APP_RETURN_URL || process.env.PHONEPE_DEEP_LINK_RETURN_URL || "rentmanagementmobile:///login";
     res
       .status(200)
       .send(`<!doctype html>
@@ -246,6 +352,12 @@ async function handlePhonePeCheckoutPage(req, res) {
       window.addEventListener("load", function () {
         message.textContent = "Tap below to continue securely with PhonePe.";
       });
+      setTimeout(function () {
+        if (!window.PhonePeCheckout || !window.PhonePeCheckout.transact) {
+          message.textContent = "Opening PhonePe in browser...";
+          window.location.href = tokenUrl;
+        }
+      }, 900);
     </script>
   </body>
 </html>`);
@@ -261,6 +373,74 @@ function formatReturnDate(value) {
   return Number.isNaN(date.getTime())
     ? "-"
     : date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function appendReturnParams(baseUrl, transaction, status) {
+  const fallback = "rentmanagementmobile:///payment-result";
+  const value = String(baseUrl || fallback);
+  try {
+    const parsedReturnUrl = new URL(value);
+    parsedReturnUrl.searchParams.set("transactionId", String(transaction._id));
+    parsedReturnUrl.searchParams.set("payment", status);
+    return parsedReturnUrl.toString();
+  } catch (_err) {
+    const separator = value.includes("?") ? "&" : "?";
+    return `${value}${separator}transactionId=${encodeURIComponent(String(transaction._id))}&payment=${encodeURIComponent(status)}`;
+  }
+}
+
+function sendPaymentReturnPage(res, { transaction, subscription, status, appRedirectUrl }) {
+  const isSuccess = status === "success";
+  const isFailed = ["failed", "cancelled", "canceled"].includes(status);
+  const title = isSuccess ? "Payment successful" : isFailed ? "Payment failed" : "Payment pending";
+  const message = isSuccess
+    ? "Your payment has been confirmed. Return to EazyRent to continue."
+    : isFailed
+      ? "Payment was not completed. Return to EazyRent and try again."
+      : "Payment is still being confirmed. Return to EazyRent to check the latest status.";
+  const amount = `${transaction.currency || "INR"} ${Number(transaction.amount || 0).toLocaleString("en-IN")}`;
+  const validTill = formatReturnDate(subscription?.endDate);
+
+  return res.status(200).send(`<!doctype html>
+<html>
+  <head>
+    <title>${escapeHtml(title)}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif; background: #fff8f1; color: #111827; }
+      main { width: min(430px, calc(100% - 32px)); padding: 24px; border: 1px solid #efe0d3; border-radius: 14px; background: #fffdf9; text-align: center; box-shadow: 0 10px 28px rgba(74, 33, 56, 0.12); }
+      .mark { width: 58px; height: 58px; margin: 0 auto 14px; display: grid; place-items: center; border-radius: 50%; background: ${isSuccess ? "#dcfce7" : isFailed ? "#fee2e2" : "#fef3c7"}; color: ${isSuccess ? "#15803d" : isFailed ? "#b91c1c" : "#a16207"}; font-size: 30px; font-weight: 900; }
+      h1 { margin: 0; font-size: 25px; }
+      p { color: #6b7280; line-height: 1.5; }
+      .summary { margin-top: 16px; padding: 12px; border-radius: 8px; background: #f8f3ec; text-align: left; }
+      .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px; }
+      .label { color: #6b7280; }
+      .value { font-weight: 800; text-align: right; }
+      a { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; width: 100%; margin-top: 18px; border-radius: 8px; background: #7a365d; color: white; text-decoration: none; font-weight: 800; }
+      small { display: block; margin-top: 12px; color: #8b7667; line-height: 1.45; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">${isSuccess ? "✓" : isFailed ? "!" : "..."}</div>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(message)}</p>
+      <div class="summary">
+        <div class="row"><span class="label">Transaction</span><span class="value">${escapeHtml(String(transaction._id).slice(-8).toUpperCase())}</span></div>
+        <div class="row"><span class="label">Amount</span><span class="value">${escapeHtml(amount)}</span></div>
+        ${isSuccess && validTill !== "-" ? `<div class="row"><span class="label">Valid till</span><span class="value">${escapeHtml(validTill)}</span></div>` : ""}
+      </div>
+      <a id="openApp" href="${escapeHtml(appRedirectUrl)}">Return to EazyRent</a>
+      <small>If the app does not open automatically, tap the button above.</small>
+    </main>
+    <script>
+      const appUrl = ${JSON.stringify(appRedirectUrl)};
+      setTimeout(function () {
+        window.location.href = appUrl;
+      }, 700);
+    </script>
+  </body>
+</html>`);
 }
 
 async function handlePhonePeReturn(req, res) {
@@ -313,20 +493,12 @@ async function handlePhonePeReturn(req, res) {
     }
 
     const status = String(transaction.status || "pending").toLowerCase();
-    const appReturnUrl = process.env.FRONTEND_PAYMENT_RETURN_URL
-      || process.env.PHONEPE_APP_RETURN_URL
-      || "rentmanagementmobile://payment-result";
-    let appRedirectUrl = appReturnUrl;
-    try {
-      const parsedReturnUrl = new URL(appReturnUrl);
-      parsedReturnUrl.searchParams.set("transactionId", String(transaction._id));
-      parsedReturnUrl.searchParams.set("payment", status);
-      appRedirectUrl = parsedReturnUrl.toString();
-    } catch (_err) {
-      const separator = appReturnUrl.includes("?") ? "&" : "?";
-      appRedirectUrl = `${appReturnUrl}${separator}transactionId=${encodeURIComponent(String(transaction._id))}&payment=${encodeURIComponent(status)}`;
-    }
-    return res.redirect(302, appRedirectUrl);
+    const subscription = await Subscription.findById(transaction.subscriptionId).lean();
+    const appReturnUrl = process.env.PHONEPE_APP_RETURN_URL
+      || process.env.PHONEPE_DEEP_LINK_RETURN_URL
+      || "rentmanagementmobile:///payment-result";
+    const appRedirectUrl = appendReturnParams(appReturnUrl, transaction, status);
+    return sendPaymentReturnPage(res, { transaction, subscription, status, appRedirectUrl });
   } catch (err) {
     console.error("phonepe return page error:", err);
     return res.status(500).send("Unable to verify payment");
@@ -359,6 +531,42 @@ router.post("/create", requireSystemAuth, async (req, res) => {
 
     if (!organization || !subscription) {
       return res.status(404).json({ message: "Payment context not found" });
+    }
+
+    const existingMerchantOrderId =
+      transaction.responsePayload?.merchantOrderId ||
+      transaction.responsePayload?.merchantTransactionId ||
+      transaction.merchantTransactionId;
+    const existingProvider = String(transaction.responsePayload?.provider || transaction.provider || "").toLowerCase();
+    if (existingProvider === "phonepe" && existingMerchantOrderId && ["created", "pending"].includes(transaction.status)) {
+      try {
+        const providerStatus = await checkPhonePeOrderStatus(existingMerchantOrderId);
+        transaction.callbackPayload = {
+          ...(transaction.callbackPayload || {}),
+          createStatusPoll: providerStatus,
+          polledAt: new Date(),
+        };
+        transaction.status = providerStatus.status;
+        await transaction.save();
+        if (providerStatus.status === "success") {
+          const activatedSubscription = await activatePaidSubscription(transaction, {
+            source: "phonepe-create-reconcile",
+            status: providerStatus.status,
+            providerStatus,
+          });
+          return res.json({
+            transaction,
+            subscription: activatedSubscription,
+            payment: {
+              provider: "phonepe",
+              status: "success",
+              message: "Existing PhonePe payment confirmed.",
+            },
+          });
+        }
+      } catch (statusError) {
+        console.error("create payment existing status check error:", statusError);
+      }
     }
 
     const intent = await createPaymentIntent({ transaction, organization, subscription });

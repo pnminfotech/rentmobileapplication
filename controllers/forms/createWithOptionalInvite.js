@@ -141,8 +141,10 @@
 const mongoose = require("mongoose");
 const Invite = require("../../models/Invite");
 const Form = require("../../models/formModels");
+const Organization = require("../../models/Organization");
 const { getCurrentMonthlyRent } = require("../../routes/_helpers/rentHistory");
 const { scopedQuery, scopedCreate } = require("../../utils/organizationScope");
+const { sendAdmissionSms } = require("../../services/smsService");
 
 // Re-use central SrNo helper from formController
 const {
@@ -325,6 +327,12 @@ async function createWithOptionalInvite(req, res) {
     try {
       await assertBedIsVacant(req, rest);
       const saved = await createFormWithSrNo(req, rest, null);
+      const organization = saved.organizationId
+        ? await Organization.findById(saved.organizationId).lean()
+        : null;
+      sendAdmissionSms(saved, organization || {}).catch((err) =>
+        console.error("Admission SMS failed:", err.message)
+      );
       return res.status(201).json(saved);
     } catch (err) {
       console.error("create form (no invite) error:", err);

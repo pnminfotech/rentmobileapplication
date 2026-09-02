@@ -35,7 +35,7 @@ function isActiveDuringMonth(tenant = {}, range) {
 function activeSettings(req, tenant = {}) {
   const type = tenantType(tenant);
   const settings = req.organization?.lightBillSettings?.[type] || {};
-  if (!settings.enabled || !settings.addToRentCollection || settings.mode === "none") return { type, settings: null };
+  if (!settings.enabled || settings.mode === "none") return { type, settings: null };
   return { type, settings };
 }
 
@@ -149,6 +149,17 @@ async function getLightBillQuoteForMonth(req, tenant = {}, monthKey = "") {
   if (!settings) return empty;
 
   const mode = settings.mode;
+  if (mode === "owner_only" || !settings.addToRentCollection) {
+    return {
+      enabled: true,
+      applicable: false,
+      mode,
+      modeLabel: "Light bill included in rent",
+      expected: 0,
+      breakdown: [{ label: "Owner pays the light bill. No separate light bill will be added in rent collection.", amount: 0 }],
+    };
+  }
+
   if (mode === "fixed_monthly" || mode === "fixed_per_tenant") {
     const expected = Number(settings.fixedAmount || 0);
     return {

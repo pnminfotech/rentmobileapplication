@@ -195,6 +195,8 @@ const firstRentMonth = String(body.firstRentMonth || rentMonth).trim();
       name: body.name,
       joiningDate,
       propertyType,
+      hasWing: toBool(body.hasWing),
+      wingName: body.wingName ? String(body.wingName).trim() : "",
       roomId: body.roomId ? String(body.roomId).trim() : undefined,
       roomNo: body.roomNo,
       depositAmount: toNum(body.depositAmount),

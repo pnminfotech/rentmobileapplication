@@ -344,7 +344,7 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ message: "bedCount must be a positive integer" });
     }
 
-    if ((normalizedPropertyType === "room" || normalizedPropertyType === "shop") && normalizedHasWing && !normalizedWingName) {
+    if (normalizedHasWing && !normalizedWingName) {
       return res.status(400).json({ message: "wingName is required when hasWing is enabled" });
     }
 

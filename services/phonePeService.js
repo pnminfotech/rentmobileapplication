@@ -56,9 +56,8 @@ function phonePeConfig() {
     (publicBase ? `${trimEndSlash(publicBase)}/api/saas/payments/phonepe/return` : "");
   const appReturnUrl =
     envValue("PHONEPE_APP_RETURN_URL") ||
-    envValue("FRONTEND_PAYMENT_RETURN_URL") ||
     envValue("PHONEPE_DEEP_LINK_RETURN_URL") ||
-    "rentmanagementmobile://payment-result";
+    "rentmanagementmobile:///payment-result";
   const checkoutBaseUrl =
     envValue("PHONEPE_CHECKOUT_BASE_URL") ||
     publicBase ||
@@ -115,6 +114,12 @@ function resolveOrderState(data = {}) {
     data.status ||
     data.data?.state ||
     data.data?.status ||
+    data.eventData?.state ||
+    data.eventData?.status ||
+    data.eventData?.orderState ||
+    data.eventData?.paymentState ||
+    data.payload?.state ||
+    data.payload?.status ||
     data.paymentState ||
     ""
   ).toUpperCase();
@@ -267,8 +272,10 @@ function extractMerchantOrderId(payload = {}) {
     payload.data?.orderId ||
     payload.eventData?.merchantOrderId ||
     payload.eventData?.orderId ||
+    payload.eventData?.merchantTransactionId ||
     payload.payload?.merchantOrderId ||
     payload.payload?.orderId ||
+    payload.payload?.merchantTransactionId ||
     ""
   );
 }
