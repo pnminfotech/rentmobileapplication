@@ -119,7 +119,19 @@ function pruneConflictingFutureSnapshots(snapshots = [], tenant = {}) {
 
 function getCurrentMonthlyRent(tenant = {}, roomsData = []) {
   if (roomsData && tenant?.roomNo && tenant?.bedNo) {
-    const room = roomsData.find((r) => String(r.roomNo) === String(tenant.roomNo));
+    // Room numbers can repeat across wings/buildings. Prefer the stored roomId
+    // and only fall back to the location fields for older tenant records.
+    const room = (tenant.roomId && roomsData.find((item) => String(item._id) === String(tenant.roomId)))
+      || roomsData.find((item) =>
+        String(item.roomNo) === String(tenant.roomNo)
+        && (!tenant.propertyType || String(item.propertyType) === String(tenant.propertyType))
+        && (!tenant.category || String(item.category || "") === String(tenant.category))
+        && (!tenant.wingName || String(item.wingName || "") === String(tenant.wingName))
+      )
+      || roomsData.find((item) =>
+        String(item.roomNo) === String(tenant.roomNo)
+        && (!tenant.propertyType || String(item.propertyType) === String(tenant.propertyType))
+      );
     const bed = room?.beds?.find((b) => String(b.bedNo) === String(tenant.bedNo));
     const bedRent = toNum(bed?.price) || toNum(bed?.baseRent) || toNum(bed?.monthlyRent);
     if (bedRent) return bedRent;

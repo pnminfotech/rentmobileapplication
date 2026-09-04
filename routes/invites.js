@@ -11,7 +11,6 @@ const {
   createInviteForForm,
   validateInvite,
 } = require("../controllers/invites");
-const Organization = require("../models/Organization");
 const router = express.Router();
 
 function propertyTypeFromTenant(tenant = {}) {

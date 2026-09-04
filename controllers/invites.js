@@ -439,6 +439,9 @@ exports.createInvite = async (req, res) => {
 
     const prefill = req.body || {};
     const toDate = (v) => (v ? new Date(v) : undefined);
+
+    
+    
     const toStr = (v) => (v === "" || v == null ? undefined : String(v));
     const toBool = (v) => v === true || String(v || "").toLowerCase() === "true";
     const toNumOrFallback = (...vals) => {
@@ -512,6 +515,8 @@ exports.createInvite = async (req, res) => {
       firstRentStatus,
       firstRentMonth,
       paymentMode,
+      hasWing: toBool(prefill.hasWing),
+      wingName: toStr(prefill.wingName),
       hasCanteen,
       canteenPlanType,
       canteenStartDate,
@@ -524,8 +529,14 @@ exports.createInvite = async (req, res) => {
     const previewUrl = buildInviteUrl(req, token, inviteUrlData);
 
     // ✅ Optional: pre-check bed occupancy (faster error)
-    const bedCandidates = await Form.find(scopedQuery(req, { roomNo, bedNo }))
-      .select("_id name category leaveDate intakeStatus phoneNo srNo")
+    const roomId = toStr(prefill.roomId);
+    const wingName = toStr(prefill.wingName) || "";
+    const floorNo = toStr(prefill.floorNo) || "";
+    const bedCandidates = await Form.find(scopedQuery(req, {
+      ...(roomId ? { roomId } : { propertyType, roomNo, bedNo, category, wingName, floorNo }),
+      ...(roomId ? { bedNo } : {}),
+    }))
+      .select("_id name roomId category wingName floorNo leaveDate intakeStatus phoneNo srNo")
       .lean();
     const existing = bedCandidates.find((tenant) => isActiveBedTenant(tenant, category));
     if (existing?.intakeStatus === "pending_tenant") {
@@ -537,62 +548,115 @@ exports.createInvite = async (req, res) => {
         });
       }
 
+      const updatedDraft = await Form.findOneAndUpdate(
+        scopedQuery(req, { _id: existing._id }),
+        {
+          $set: {
+            name,
+            phoneNo,
+            joiningDate: new Date(joiningDate),
+            depositAmount: dep,
+            category,
+            propertyType,
+            roomId,
+            hasWing: toBool(prefill.hasWing),
+            wingName: toStr(prefill.wingName) || "",
+            floorNo: toStr(prefill.floorNo),
+            roomNo,
+            bedNo,
+            baseRent: monthlyRent,
+            rentAmount: monthlyRent,
+            firstRentStatus,
+            firstRentMonth,
+            paymentMode,
+            hasCanteen,
+            canteenPlanType,
+            canteenStartDate: toDate(canteenStartDate),
+            canteenMonthlyAmount,
+            canteenIncludedMeals,
+            address: toStr(prefill.address),
+            pincode: prefill.pincode || undefined,
+            city: prefill.city || undefined,
+            state: prefill.state || undefined,
+            houseNo: prefill.houseNo || undefined,
+            nearbyPlace: prefill.nearbyPlace || undefined,
+            familyMembers: toNumOrFallback(prefill.familyMembers, 0),
+            shopName: toStr(prefill.shopName),
+            shopBusiness: toStr(prefill.shopBusiness),
+            companyAddress: toStr(prefill.companyAddress),
+            dateOfJoiningCollege: toDate(prefill.dateOfJoiningCollege),
+            dob: toDate(prefill.dob),
+          },
+        },
+        { new: true }
+      ).lean();
+
       const existingInvite = await Invite.findOne(scopedQuery(req, {
         usedByFormId: existing._id,
         usedAt: null,
         expiresAt: { $gt: new Date() },
       })).sort({ createdAt: -1 });
 
-      if (existingInvite) {
-        return res.json({
-          ok: true,
-          reused: true,
-          token: existingInvite.token,
-          url: buildInviteUrl(req, existingInvite.token, inviteUrlData),
-          inviteId: existingInvite._id,
-          formId: existing._id,
-          srNo: existing.srNo,
-          expiresAt: existingInvite.expiresAt,
-        });
-      }
+      const updatedPrefill = {
+        ...prefill,
+        category,
+        propertyType,
+        roomNo,
+        bedNo,
+        name,
+        phoneNo,
+        joiningDate,
+        rentAmount: monthlyRent,
+        baseRent: monthlyRent,
+        depositAmount: dep,
+        srNo: existing.srNo,
+        hasWing: toBool(prefill.hasWing),
+        wingName: toStr(prefill.wingName) || "",
+        firstRentStatus,
+        firstRentMonth,
+        paymentMode,
+        hasCanteen,
+        canteenPlanType,
+        canteenStartDate,
+        canteenMonthlyAmount,
+        canteenIncludedMeals,
+      };
 
-      const replacementInvite = await Invite.create({
-        token,
-        prefill: {
-          ...prefill,
-          category,
-          propertyType,
-          roomNo,
-          bedNo,
-          name,
-          phoneNo,
-          rentAmount: monthlyRent,
-          baseRent: monthlyRent,
-          depositAmount: dep,
-          srNo: existing.srNo,
-          firstRentStatus,
-          firstRentMonth,
-          paymentMode,
-          hasCanteen,
-          canteenPlanType,
-          canteenStartDate,
-          canteenMonthlyAmount,
-          canteenIncludedMeals,
-        },
-        usedByFormId: existing._id,
-        usedAt: null,
-        organizationId: req.organizationId || null,
-        expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
-      });
+      const replacementInvite = existingInvite
+        ? await Invite.findOneAndUpdate(
+            scopedQuery(req, { _id: existingInvite._id }),
+            {
+              $set: {
+                prefill: updatedPrefill,
+                expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
+              },
+            },
+            { new: true }
+          )
+        : await Invite.create({
+            token,
+            prefill: updatedPrefill,
+            usedByFormId: existing._id,
+            usedAt: null,
+            organizationId: req.organizationId || null,
+            expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
+          });
+
+      const organization = req.organizationId
+        ? await Organization.findById(req.organizationId).lean()
+        : null;
+      sendAdmissionSms(updatedDraft || existing, organization || {}).catch((err) =>
+        console.error("Admission SMS failed:", err.message)
+      );
 
       return res.json({
         ok: true,
-        reused: true,
-        token,
-        url: previewUrl,
+        refreshed: true,
+        token: replacementInvite.token,
+        url: buildInviteUrl(req, replacementInvite.token, inviteUrlData),
         inviteId: replacementInvite._id,
-        formId: existing._id,
-        srNo: existing.srNo,
+        formId: updatedDraft?._id || existing._id,
+        srNo: updatedDraft?.srNo || existing.srNo,
         expiresAt: replacementInvite.expiresAt,
       });
     }
@@ -624,8 +688,10 @@ exports.createInvite = async (req, res) => {
         srNo,
         category,          // ✅ IMPORTANT (fix null category)
         propertyType,
-        roomId: toStr(prefill.roomId),
+        roomId,
         floorNo: toStr(prefill.floorNo),
+        hasWing: toBool(prefill.hasWing),
+        wingName: toStr(prefill.wingName) || "",
         roomNo,
         bedNo,
         name,
@@ -666,8 +732,10 @@ exports.createInvite = async (req, res) => {
     } catch (e) {
       // ✅ if bed unique index hits (category+roomNo+bedNo)
       if (e?.code === 11000 && e?.keyPattern?.category && e?.keyPattern?.roomNo && e?.keyPattern?.bedNo) {
-        const activeConflict = (await Form.find(scopedQuery(req, { roomNo, bedNo }))
-          .select("_id name category leaveDate")
+        const activeConflict = (await Form.find(scopedQuery(req, {
+          ...(roomId ? { roomId, bedNo } : { propertyType, roomNo, bedNo, category, wingName, floorNo }),
+        }))
+          .select("_id name roomId category leaveDate")
           .lean()).find((tenant) => isActiveBedTenant(tenant, category));
 
         if (!activeConflict) {
@@ -695,6 +763,8 @@ exports.createInvite = async (req, res) => {
         roomNo,
         bedNo,
         name,
+        hasWing: toBool(prefill.hasWing),
+        wingName: toStr(prefill.wingName) || "",
         rentAmount: monthlyRent,
         baseRent: monthlyRent,
         depositAmount: dep,
@@ -758,6 +828,8 @@ exports.createInviteForForm = async (req, res) => {
         category: existing.category,
         propertyType: await inferInvitePropertyType(existing, req.organizationId || existing.organizationId),
         roomId: existing.roomId,
+        hasWing: existing.hasWing,
+        wingName: existing.wingName,
         floorNo: existing.floorNo,
         roomNo: existing.roomNo,
         bedNo: existing.bedNo,
@@ -789,19 +861,37 @@ exports.createInviteForForm = async (req, res) => {
       }).filter(([, value]) => value !== "" && value != null)
     );
 
-    const doc = await Invite.create({
-      token,
-      prefill,
+    const existingInvite = await Invite.findOne(scopedQuery(req, {
       usedByFormId: existing._id,
       usedAt: null,
-      organizationId: req.organizationId || existing.organizationId || null,
-      expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
-    });
+      expiresAt: { $gt: new Date() },
+    })).sort({ createdAt: -1 });
+
+    const doc = existingInvite
+      ? await Invite.findOneAndUpdate(
+          scopedQuery(req, { _id: existingInvite._id }),
+          {
+            $set: {
+              prefill,
+              expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
+            },
+          },
+          { new: true }
+        )
+      : await Invite.create({
+          token,
+          prefill,
+          usedByFormId: existing._id,
+          usedAt: null,
+          organizationId: req.organizationId || existing.organizationId || null,
+          expiresAt: new Date(Date.now() + INVITE_VALIDITY_MS),
+        });
 
     return res.json({
       ok: true,
-      token,
-      url: buildInviteUrl(req, token, { ...prefill, monthlyRent, depositAmount: existing.depositAmount }),
+      refreshed: Boolean(existingInvite),
+      token: doc.token,
+      url: buildInviteUrl(req, doc.token, { ...prefill, monthlyRent, depositAmount: existing.depositAmount }),
       inviteId: doc._id,
       formId: existing._id,
       srNo: existing.srNo,
@@ -820,7 +910,7 @@ exports.validateInvite = async (req, res) => {
 
     const invDoc = await Invite.findOne({ token }).populate(
       "usedByFormId",
-      "srNo propertyType roomId roomNo bedNo hasCanteen canteenPlanType canteenStartDate canteenMonthlyAmount canteenIncludedMeals documents intakeStatus address pincode city state houseNo nearbyPlace relativeAddress1 relative1Relation relative1Name relative1Phone relative2Relation relative2Name relative2Phone familyMembers shopName shopBusiness companyAddress dateOfJoiningCollege dob"
+      "srNo name phoneNo category propertyType roomId hasWing wingName floorNo roomNo bedNo joiningDate baseRent rentAmount depositAmount firstRentStatus firstRentMonth paymentMode hasCanteen canteenPlanType canteenStartDate canteenMonthlyAmount canteenIncludedMeals documents intakeStatus address pincode city state houseNo nearbyPlace relativeAddress1 relative1Relation relative1Name relative1Phone relative2Relation relative2Name relative2Phone familyMembers shopName shopBusiness companyAddress dateOfJoiningCollege dob"
     );
     if (!invDoc) return res.status(404).json({ ok: false, message: "Invite not found" });
 
@@ -845,7 +935,7 @@ exports.validateInvite = async (req, res) => {
       "address", "pincode", "city", "state", "houseNo", "nearbyPlace", "relativeAddress1",
       "relative1Relation", "relative1Name", "relative1Phone",
       "relative2Relation", "relative2Name", "relative2Phone",
-      "propertyType", "hasCanteen", "canteenPlanType", "canteenStartDate", "canteenMonthlyAmount", "canteenIncludedMeals", "familyMembers", "shopName", "shopBusiness", "companyAddress", "dateOfJoiningCollege", "dob",
+      "name", "phoneNo", "category", "propertyType", "roomId", "hasWing", "wingName", "floorNo", "roomNo", "bedNo", "joiningDate", "baseRent", "rentAmount", "depositAmount", "firstRentStatus", "firstRentMonth", "paymentMode", "hasCanteen", "canteenPlanType", "canteenStartDate", "canteenMonthlyAmount", "canteenIncludedMeals", "familyMembers", "shopName", "shopBusiness", "companyAddress", "dateOfJoiningCollege", "dob",
     ]) {
       if ((prefill[key] === undefined || prefill[key] === null || prefill[key] === "") && existingForm?.[key]) {
         prefill[key] = existingForm[key];

@@ -43,8 +43,11 @@ const BILLING_MODES = new Set([
   "tenant_unit_meter",
   "fixed_monthly",
   "room_meter_split",
+  "room_meter_rate",
+  "room_meter_actual_bill",
   "included_extra_split",
   "fixed_per_tenant",
+  "common_owner_bill",
   "common_meter_split",
 ]);
 
@@ -64,6 +67,19 @@ function monthRange(value) {
   };
 }
 
+function billingMonthFromDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getMonth()] + `-${String(date.getFullYear()).slice(-2)}`;
+}
+
+function normalizeBillingMonth(value, fallbackDate) {
+  const month = String(value || "").trim();
+  return /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2}$/.test(month)
+    ? month
+    : billingMonthFromDate(fallbackDate);
+}
+
 exports.createLightBill = async (req, res) => {
   try {
     const {
@@ -79,8 +95,9 @@ exports.createLightBill = async (req, res) => {
       previousReading,
       totalReading,
       consumedUnits,
+      includedUnits,
       ratePerUnit,
-      fixedCharge,
+      billingMonth,
       amount,
       salary,
       customLabel,
@@ -91,7 +108,9 @@ exports.createLightBill = async (req, res) => {
     const normalizedBillPayer = billPayer === "owner" ? "owner" : "tenant";
     const requestedBillingMode = normalizeText(billingMode) || (normalizedBillPayer === "owner" ? "owner_only" : "tenant_unit_manual");
     const normalizedBillingMode = BILLING_MODES.has(requestedBillingMode) ? requestedBillingMode : (normalizedBillPayer === "owner" ? "owner_only" : "tenant_unit_manual");
-    const linkedToUnit = normalizedBillPayer === "tenant" && isUnitLinked !== false;
+    // An owner-paid bill can also be linked to a room. It identifies the unit
+    // without making the bill recoverable from tenants.
+    const linkedToUnit = isUnitLinked !== false;
     const normalizedRoomNo = linkedToUnit ? normalizeIdentifier(roomNo) : "";
     const normalizedMeterNo = normalizeIdentifier(meterNo);
     const normalizedPropertyType = propertyType || "bed";
@@ -99,9 +118,10 @@ exports.createLightBill = async (req, res) => {
     const numericPreviousReading = previousReading === undefined || previousReading === "" ? null : Number(previousReading);
     const numericTotalReading = totalReading === undefined || totalReading === "" ? null : Number(totalReading);
     const numericConsumedUnits = consumedUnits === undefined || consumedUnits === "" ? null : Number(consumedUnits);
+    const numericIncludedUnits = includedUnits === undefined || includedUnits === "" ? null : Number(includedUnits);
     const numericRatePerUnit = ratePerUnit === undefined || ratePerUnit === "" ? null : Number(ratePerUnit);
-    const numericFixedCharge = fixedCharge === undefined || fixedCharge === "" ? null : Number(fixedCharge);
     const billDate = new Date(date);
+    const normalizedBillingMonth = normalizeBillingMonth(billingMonth, billDate);
 
     if (!name || !normalizeText(name)) {
       return res.status(400).json({ message: "Bill name is required" });
@@ -112,8 +132,12 @@ exports.createLightBill = async (req, res) => {
     if (Number.isNaN(billDate.getTime())) {
       return res.status(400).json({ message: "Valid bill date is required" });
     }
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      return res.status(400).json({ message: "Bill amount must be greater than zero" });
+    if (!normalizedBillingMonth) {
+      return res.status(400).json({ message: "Valid billing month is required" });
+    }
+    const allowsZeroAmount = ["tenant_unit_meter", "room_meter_split", "room_meter_rate"].includes(normalizedBillingMode) && linkedToUnit;
+    if (!Number.isFinite(numericAmount) || numericAmount < 0 || (!allowsZeroAmount && numericAmount <= 0)) {
+      return res.status(400).json({ message: allowsZeroAmount ? "Bill amount cannot be negative" : "Bill amount must be greater than zero" });
     }
     if (numericPreviousReading !== null && (!Number.isFinite(numericPreviousReading) || numericPreviousReading < 0)) {
       return res.status(400).json({ message: "Previous reading must be zero or greater" });
@@ -131,19 +155,34 @@ exports.createLightBill = async (req, res) => {
     if (numericConsumedUnits !== null && (!Number.isFinite(numericConsumedUnits) || numericConsumedUnits < 0)) {
       return res.status(400).json({ message: "Consumed units must be zero or greater" });
     }
+    if (numericIncludedUnits !== null && (!Number.isFinite(numericIncludedUnits) || numericIncludedUnits < 0)) {
+      return res.status(400).json({ message: "Included units must be zero or greater" });
+    }
     if (linkedToUnit && !normalizedRoomNo && !roomId) {
       return res.status(400).json({ message: "Select a room/unit for tenant light bill" });
     }
 
+    const linkedRoom = linkedToUnit
+      ? await Room.findOne(scopedQuery(req, roomId
+        ? { _id: roomId }
+        : { propertyType: normalizedPropertyType, roomNo: normalizedRoomNo }
+      )).lean()
+      : null;
+
     if (linkedToUnit) {
-      const { start: startOfMonth, end: endOfMonth } = monthRange(date);
       const filter = scopedQuery(req, {
         isUnitLinked: true,
         propertyType: normalizedPropertyType,
-        date: { $gte: startOfMonth, $lt: endOfMonth }
+        billingMonth: normalizedBillingMonth,
       });
-      if (roomId) filter.$or = [{ roomId }, { roomNo: normalizedRoomNo }];
-      else filter.roomNo = normalizedRoomNo;
+      if (roomId) {
+        filter.roomId = roomId;
+      } else {
+        filter.roomNo = normalizedRoomNo;
+        if (linkedRoom?.category) filter.category = linkedRoom.category;
+        if (linkedRoom?.wingName) filter.wingName = linkedRoom.wingName;
+        if (linkedRoom?.floorNo) filter.floorNo = linkedRoom.floorNo;
+      }
 
       const existing = await LightBillEntry.findOne(filter);
       if (existing) {
@@ -151,12 +190,11 @@ exports.createLightBill = async (req, res) => {
       }
     }
 
-    if (!linkedToUnit && normalizedBillingMode === "common_meter_split") {
-      const { start: startOfMonth, end: endOfMonth } = monthRange(date);
+    if (!linkedToUnit && ["common_owner_bill", "common_meter_split"].includes(normalizedBillingMode)) {
       const existing = await LightBillEntry.findOne(scopedQuery(req, {
         propertyType: "bed",
-        billingMode: "common_meter_split",
-        date: { $gte: startOfMonth, $lt: endOfMonth },
+        billingMode: normalizedBillingMode,
+        billingMonth: normalizedBillingMonth,
       }));
       if (existing) {
         return res.status(409).json({ message: "Common hostel light bill already exists for this month" });
@@ -185,17 +223,22 @@ exports.createLightBill = async (req, res) => {
       isUnitLinked: linkedToUnit,
       roomId: linkedToUnit && roomId ? roomId : null,
       propertyType: normalizedPropertyType,
+      category: linkedRoom?.category || "",
+      wingName: linkedRoom?.wingName || "",
+      floorNo: linkedRoom?.floorNo || "",
       roomNo: normalizedRoomNo,
       meterNo: normalizedMeterNo,
       previousReading: numericPreviousReading,
       totalReading: numericTotalReading,
       consumedUnits: numericConsumedUnits,
+      includedUnits: numericIncludedUnits,
       ratePerUnit: numericRatePerUnit,
-      fixedCharge: numericFixedCharge,
+      fixedCharge: 0,
       amount: numericAmount,
       salary,
       customLabel,
       status,
+      billingMonth: normalizedBillingMonth,
       date: billDate,
       createdByName: actorName(req),
       updatedByName: actorName(req),

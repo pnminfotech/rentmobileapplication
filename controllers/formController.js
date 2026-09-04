@@ -55,7 +55,9 @@ function tenantSlotFromData(data = {}) {
   const propertyType = propertyTypeFromTenantData(data);
   return {
     propertyType,
+    roomId: String(data.roomId || "").trim(),
     category: normalizeIdentifier(data.category),
+    wingName: normalizeIdentifier(data.wingName),
     floorNo: normalizeIdentifier(data.floorNo),
     roomNo: normalizeIdentifier(data.roomNo),
     bedNo: normalizeIdentifier(
@@ -82,18 +84,20 @@ async function validateTenantSlotAvailable(req, data = {}, excludeId = null) {
   if (excludeId) query._id = { $ne: excludeId };
 
   const candidates = await Form.find(query)
-    .select("name propertyType category floorNo roomNo bedNo leaveDate")
+    .select("name propertyType roomId category wingName floorNo roomNo bedNo leaveDate")
     .lean();
 
   const occupied = candidates.find((tenant) => {
     if (!isTenantActiveForOccupancy(tenant)) return false;
     const existingSlot = tenantSlotFromData(tenant);
-    return (
-      existingSlot.category === slot.category &&
+    const isSameUnit =
+      (slot.roomId && existingSlot.roomId && existingSlot.roomId === slot.roomId) ||
+      (existingSlot.category === slot.category &&
+        existingSlot.wingName === slot.wingName &&
       existingSlot.floorNo === slot.floorNo &&
       existingSlot.roomNo === slot.roomNo &&
-      existingSlot.bedNo === slot.bedNo
-    );
+        existingSlot.bedNo === slot.bedNo);
+    return isSameUnit;
   });
 
   if (!occupied) return null;

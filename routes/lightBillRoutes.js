@@ -74,6 +74,7 @@ const authAdmin = require("../middleware/adminAuth");
 const { attachSystemAuthIfPresent } = require("../middleware/saasAuth");
 const { scopedQuery, scopedUpdate } = require("../utils/organizationScope");
 const { actorName, diffRecords, writeAuditLog } = require("../utils/auditLogger");
+const { getLightBillCollectionSummary } = require("./_helpers/lightBillBilling");
 
 router.use(attachSystemAuthIfPresent);
 router.use(authAdmin);
@@ -91,7 +92,10 @@ const BED_MODES = new Set([
   "none",
   "owner_only",
   "room_meter_split",
+  "room_meter_rate",
+  "room_meter_actual_bill",
   "fixed_per_tenant",
+  "common_owner_bill",
   "included_extra_split",
   "common_meter_split",
   "record_only",
@@ -105,7 +109,11 @@ function toNumber(value) {
 
 function normalizePropertySettings(type, input = {}) {
   const allowedModes = type === "bed" ? BED_MODES : ROOM_SHOP_MODES;
-  const mode = allowedModes.has(String(input.mode || "")) ? String(input.mode) : "none";
+  const requestedMode = String(input.mode || "");
+  const legacyMode = requestedMode === "room_meter_split" || requestedMode === "included_extra_split"
+    ? "room_meter_rate"
+    : requestedMode;
+  const mode = allowedModes.has(legacyMode) ? legacyMode : "none";
   const enabled = Boolean(input.enabled) && mode !== "none";
   const splitMethod = SPLIT_METHODS.has(String(input.splitMethod || ""))
     ? String(input.splitMethod)
@@ -114,12 +122,12 @@ function normalizePropertySettings(type, input = {}) {
   return {
     enabled,
     mode: enabled ? mode : "none",
-    addToRentCollection: Boolean(input.addToRentCollection) && !["none", "owner_only", "record_only", "tenant_direct"].includes(mode),
+    addToRentCollection: Boolean(input.addToRentCollection) && !["none", "owner_only", "record_only", "tenant_direct", "common_owner_bill"].includes(mode),
     fixedAmount: toNumber(input.fixedAmount),
     includedAmount: toNumber(input.includedAmount),
     includedUnits: toNumber(input.includedUnits),
     ratePerUnit: toNumber(input.ratePerUnit),
-    fixedCharge: toNumber(input.fixedCharge),
+    fixedCharge: 0,
     splitMethod,
     notes: normalizeText(input.notes).slice(0, 250),
   };
@@ -193,6 +201,12 @@ function monthRange(value) {
   };
 }
 
+function billingMonthFromDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getMonth()] + `-${String(date.getFullYear()).slice(-2)}`;
+}
+
 async function syncMeterState(req, bill) {
   if (!bill || bill.type !== "meter" || bill.billPayer === "owner" || bill.isUnitLinked === false) return;
 
@@ -235,8 +249,8 @@ router.put('/:id', async (req, res) => {
     const nextType = updatePayload.type || current.type;
     const nextBillPayer = updatePayload.billPayer || current.billPayer || "tenant";
     const nextBillingMode = updatePayload.billingMode || current.billingMode || (nextBillPayer === "owner" ? "owner_only" : "tenant_unit_manual");
-    const nextIsUnitLinked = nextBillPayer !== "owner" && updatePayload.isUnitLinked !== false;
-    if (nextBillPayer === "owner") {
+    const nextIsUnitLinked = updatePayload.isUnitLinked !== false;
+    if (nextBillPayer === "owner" && !nextIsUnitLinked) {
       updatePayload.isUnitLinked = false;
       updatePayload.roomId = null;
       updatePayload.roomNo = "";
@@ -245,8 +259,7 @@ router.put('/:id', async (req, res) => {
     }
 
     if ((nextType || "meter") === "meter" && nextIsUnitLinked) {
-      const nextDate = updatePayload.date || current.date;
-      const { start, end } = monthRange(nextDate);
+      const nextBillingMonth = updatePayload.billingMonth || current.billingMonth || billingMonthFromDate(updatePayload.date || current.date);
       const nextRoomId = updatePayload.roomId ?? current.roomId;
       const nextPropertyType = updatePayload.propertyType || current.propertyType || "bed";
       const nextRoomNo = updatePayload.roomNo ?? current.roomNo ?? "";
@@ -254,10 +267,10 @@ router.put('/:id', async (req, res) => {
         _id: { $ne: req.params.id },
         propertyType: nextPropertyType,
         isUnitLinked: true,
-        date: { $gte: start, $lt: end },
+        billingMonth: nextBillingMonth,
       });
       const normalizedNextRoomNo = normalizeIdentifier(nextRoomNo);
-      if (nextRoomId) duplicateFilter.$or = [{ roomId: nextRoomId }, { roomNo: normalizedNextRoomNo }];
+      if (nextRoomId) duplicateFilter.roomId = nextRoomId;
       else duplicateFilter.roomNo = normalizedNextRoomNo;
 
       const duplicate = await LightBillEntry.findOne(duplicateFilter);
@@ -266,14 +279,13 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    if (!nextIsUnitLinked && nextBillingMode === "common_meter_split") {
-      const nextDate = updatePayload.date || current.date;
-      const { start, end } = monthRange(nextDate);
+    if (!nextIsUnitLinked && ["common_owner_bill", "common_meter_split"].includes(nextBillingMode)) {
+      const nextBillingMonth = updatePayload.billingMonth || current.billingMonth || billingMonthFromDate(updatePayload.date || current.date);
       const duplicate = await LightBillEntry.findOne(scopedQuery(req, {
         _id: { $ne: req.params.id },
         propertyType: "bed",
-        billingMode: "common_meter_split",
-        date: { $gte: start, $lt: end },
+        billingMode: nextBillingMode,
+        billingMonth: nextBillingMonth,
       }));
       if (duplicate) {
         return res.status(409).json({ message: "Common hostel light bill already exists for this month" });
@@ -293,7 +305,7 @@ router.put('/:id', async (req, res) => {
       action: "update",
       before,
       after: lightBill,
-      changes: diffRecords(before, lightBill, ["name", "billPayer", "billingMode", "isUnitLinked", "propertyType", "roomNo", "meterNo", "totalReading", "amount", "salary", "status", "date"]),
+      changes: diffRecords(before, lightBill, ["name", "billPayer", "billingMode", "isUnitLinked", "propertyType", "roomNo", "meterNo", "totalReading", "amount", "salary", "status", "billingMonth", "date"]),
     });
     res.json(lightBill);
   } catch (err) {
@@ -327,11 +339,44 @@ router.get('/all-bills', async (req, res) => {
     if (month && year) {
       const startDate = new Date(year, month - 1, 1);
       const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-      query.date = { $gte: startDate, $lte: endDate };
+      const billingMonth = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(month) - 1] + `-${String(year).slice(-2)}`;
+      query.$or = [
+        { billingMonth },
+        { billingMonth: { $exists: false }, date: { $gte: startDate, $lte: endDate } },
+      ];
     }
 
-    const bills = await LightBillEntry.find(query).sort({ date: -1 });
-    res.json(bills);
+    const bills = await LightBillEntry.find(query).sort({ date: -1 }).lean();
+    const roomIds = bills.map((bill) => bill.roomId).filter(Boolean);
+    const legacyUnitQueries = bills
+      .filter((bill) => !bill.roomId && bill.isUnitLinked !== false && bill.roomNo)
+      .map((bill) => ({ propertyType: bill.propertyType || "bed", roomNo: bill.roomNo }));
+    const rooms = (roomIds.length || legacyUnitQueries.length)
+      ? await Room.find(scopedQuery(req, {
+          $or: [
+            ...(roomIds.length ? [{ _id: { $in: roomIds } }] : []),
+            ...legacyUnitQueries,
+          ],
+        })).select("propertyType category wingName floorNo roomNo").lean()
+      : [];
+    const roomsById = new Map(rooms.map((room) => [String(room._id), room]));
+    const enrichedBills = await Promise.all(bills.map(async (bill) => {
+      const room = bill.roomId
+        ? roomsById.get(String(bill.roomId))
+        : rooms.find((item) =>
+            String(item.propertyType || "bed") === String(bill.propertyType || "bed") &&
+            String(item.roomNo || "") === String(bill.roomNo || "") &&
+            (!bill.category || String(item.category || "") === String(bill.category))
+          );
+      return {
+        ...bill,
+        category: bill.category || room?.category || "",
+        wingName: bill.wingName || room?.wingName || "",
+        floorNo: bill.floorNo || room?.floorNo || "",
+        tenantCollection: await getLightBillCollectionSummary(req, bill),
+      };
+    }));
+    res.json(enrichedBills);
   } catch (error) {
     console.error(error);
     res.status(500).send("Server Error");

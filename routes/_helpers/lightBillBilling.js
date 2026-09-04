@@ -17,6 +17,15 @@ function monthDateRange(monthKey) {
   return { start, end };
 }
 
+function billingMonthFilter(monthKey, range) {
+  return {
+    $or: [
+      { billingMonth: monthKey },
+      { billingMonth: { $exists: false }, date: { $gte: range.start, $lte: range.end } },
+    ],
+  };
+}
+
 function tenantType(tenant = {}) {
   if (tenant.propertyType === "room" || tenant.propertyType === "shop") return tenant.propertyType;
   return "bed";
@@ -39,22 +48,36 @@ function activeSettings(req, tenant = {}) {
   return { type, settings };
 }
 
+function unitLocationQuery(record = {}, propertyType) {
+  const query = { propertyType: propertyType || tenantType(record) };
+  if (record.roomId) {
+    query.roomId = record.roomId;
+    return query;
+  }
+
+  query.roomNo = record.roomNo || "";
+  if (record.category) query.category = record.category;
+  if (record.wingName) query.wingName = record.wingName;
+  if (record.floorNo) query.floorNo = record.floorNo;
+  return query;
+}
+
 async function activeTenantCount(req, tenant = {}, range, scope = "room") {
   const query = {
     propertyType: tenantType(tenant),
     intakeStatus: { $ne: "pending_tenant" },
   };
-  if (scope === "room") query.roomNo = tenant.roomNo || "";
+  if (scope === "room") Object.assign(query, unitLocationQuery(tenant));
   const tenants = await Form.find(scopedQuery(req, query)).lean();
   return Math.max(tenants.filter((item) => isActiveDuringMonth(item, range)).length, 1);
 }
 
-async function linkedBills(req, tenant = {}, type, range, mode = "") {
+async function linkedBills(req, tenant = {}, type, range, mode = "", monthKey = "") {
   const query = {
     propertyType: type,
     billPayer: "tenant",
     isUnitLinked: true,
-    date: { $gte: range.start, $lte: range.end },
+    ...billingMonthFilter(monthKey, range),
   };
   if (mode) query.billingMode = { $in: [mode, null, ""] };
   if (tenant.roomId) query.roomId = tenant.roomId;
@@ -62,24 +85,23 @@ async function linkedBills(req, tenant = {}, type, range, mode = "") {
   return LightBillEntry.find(scopedQuery(req, query)).lean();
 }
 
-async function hostelRoomBills(req, tenant = {}, range) {
+async function hostelRoomBills(req, tenant = {}, range, monthKey = "") {
   return LightBillEntry.find(scopedQuery(req, {
-    propertyType: "bed",
+    ...unitLocationQuery(tenant, "bed"),
     billPayer: "tenant",
-    billingMode: { $in: ["room_meter_split", null, ""] },
+    billingMode: { $in: ["room_meter_rate", "room_meter_actual_bill", "room_meter_split", "included_extra_split", null, ""] },
     isUnitLinked: true,
-    roomNo: tenant.roomNo || "",
-    date: { $gte: range.start, $lte: range.end },
+    ...billingMonthFilter(monthKey, range),
   })).lean();
 }
 
-async function commonHostelBills(req, range) {
+async function commonHostelBills(req, range, monthKey = "") {
   return LightBillEntry.find(scopedQuery(req, {
     propertyType: "bed",
     billPayer: "owner",
     billingMode: "common_meter_split",
     isUnitLinked: false,
-    date: { $gte: range.start, $lte: range.end },
+    ...billingMonthFilter(monthKey, range),
   })).lean();
 }
 
@@ -92,13 +114,17 @@ function meterBreakdownForBill(bill = {}, settings = {}) {
   const consumedUnits = Number(bill.consumedUnits);
   const enteredUnits = Number(bill.totalReading);
   const ratePerUnit = Number(bill.ratePerUnit ?? settings.ratePerUnit ?? 0);
-  const fixedCharge = Number(bill.fixedCharge ?? settings.fixedCharge ?? 0);
-  const includedUnits = Number(settings.includedUnits || 0);
+  const includedUnits = Number(bill.includedUnits ?? settings.includedUnits ?? 0);
+  const actualBillMode = bill.billingMode === "room_meter_actual_bill";
   const measuredUnits = Number.isFinite(consumedUnits) && consumedUnits >= 0
     ? consumedUnits
     : enteredUnits;
 
-  if (!Number.isFinite(measuredUnits) || measuredUnits < 0 || !Number.isFinite(ratePerUnit) || ratePerUnit <= 0) {
+  if (
+    !Number.isFinite(measuredUnits) ||
+    measuredUnits < 0 ||
+    (!actualBillMode && (!Number.isFinite(ratePerUnit) || ratePerUnit <= 0))
+  ) {
     return {
       recoverableAmount: amount,
       measuredUnits: null,
@@ -112,7 +138,12 @@ function meterBreakdownForBill(bill = {}, settings = {}) {
 
   const extraUnits = Math.max(measuredUnits - includedUnits, 0);
   const includedValue = includedUnits * ratePerUnit;
-  const recoverableAmount = Math.max(amount - includedValue, 0);
+  // For a room meter, tenants pay only for usage after the included limit.
+  // The owner-entered bill amount remains a record of the actual bill, but it
+  // must not change the extra-unit charge calculated from the configured rate.
+  const recoverableAmount = actualBillMode
+    ? (measuredUnits > 0 ? Math.max(amount * extraUnits / measuredUnits, 0) : 0)
+    : Math.max(extraUnits * ratePerUnit, 0);
 
   return {
     recoverableAmount,
@@ -126,6 +157,61 @@ function meterBreakdownForBill(bill = {}, settings = {}) {
   };
 }
 
+function isTenantChargeBill(bill = {}) {
+  return bill.billingMode === "common_meter_split" || (bill.billPayer !== "owner"
+    && bill.isUnitLinked !== false
+    && !["owner_only", "record_only"].includes(bill.billingMode));
+}
+
+async function getLightBillCollectionSummary(req, bill = {}) {
+  const monthKey = bill.billingMonth || (bill.date ? `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][new Date(bill.date).getMonth()]}-${String(new Date(bill.date).getFullYear()).slice(-2)}` : "");
+  const range = monthDateRange(monthKey);
+  const empty = { applicable: false, expected: 0, collected: 0, balance: 0, tenantCount: 0, paidTenantCount: 0 };
+  if (!range || !isTenantChargeBill(bill)) return empty;
+
+  const type = tenantType({ propertyType: bill.propertyType });
+  const tenantQuery = {
+    propertyType: type,
+    intakeStatus: { $ne: "pending_tenant" },
+  };
+  if (bill.billingMode !== "common_meter_split" && bill.roomNo) {
+    Object.assign(tenantQuery, unitLocationQuery(bill, type));
+  }
+  const tenants = (await Form.find(scopedQuery(req, tenantQuery)).lean())
+    .filter((tenant) => isActiveDuringMonth(tenant, range));
+  if (!tenants.length) return empty;
+
+  const settings = req.organization?.lightBillSettings?.[type] || {};
+  const roomMeterBill = ["room_meter_split", "room_meter_rate", "room_meter_actual_bill"].includes(bill.billingMode);
+  const amountPerTenant = roomMeterBill
+    ? Math.round(Number(meterBreakdownForBill(bill, settings).recoverableAmount || 0) / tenants.length)
+    : Number(bill.amount || bill.salary || 0);
+  const expectedPerTenant = bill.billingMode === "common_meter_split"
+    ? Math.round(Number(bill.amount || bill.salary || 0) / tenants.length)
+    : amountPerTenant;
+  const expected = Math.max(expectedPerTenant, 0) * tenants.length;
+
+  let collected = 0;
+  let paidTenantCount = 0;
+  tenants.forEach((tenant) => {
+    const tenantPaid = (Array.isArray(tenant.rents) ? tenant.rents : [])
+      .filter((rent) => rent.month === monthKey)
+      .reduce((sum, rent) => sum + Number(rent.lightBillAmount || 0), 0);
+    if (tenantPaid > 0) paidTenantCount += 1;
+    collected += tenantPaid;
+  });
+
+  const cappedCollected = Math.min(Math.max(collected, 0), expected);
+  return {
+    applicable: expected > 0,
+    expected,
+    collected: cappedCollected,
+    balance: Math.max(expected - cappedCollected, 0),
+    tenantCount: tenants.length,
+    paidTenantCount,
+  };
+}
+
 function modeLabel(mode) {
   const labels = {
     owner_only: "Owner/admin paid",
@@ -133,9 +219,12 @@ function modeLabel(mode) {
     tenant_unit_meter: "Unit meter bill",
     fixed_monthly: "Fixed monthly light charge",
     room_meter_split: "Room meter split",
+    room_meter_rate: "Room meter rate",
+    room_meter_actual_bill: "Actual bill split",
     included_extra_split: "Included amount plus extra split",
     fixed_per_tenant: "Fixed light charge per tenant",
     common_meter_split: "Common hostel bill split",
+    common_owner_bill: "Common hostel bill paid by owner",
   };
   return labels[mode] || "Light bill";
 }
@@ -173,7 +262,7 @@ async function getLightBillQuoteForMonth(req, tenant = {}, monthKey = "") {
   }
 
   if (["tenant_unit_manual", "tenant_unit_meter"].includes(mode)) {
-    const bills = await linkedBills(req, tenant, type, range, mode);
+    const bills = await linkedBills(req, tenant, type, range, mode, monthKey);
     const expected = billTotal(bills);
     return {
       enabled: true,
@@ -186,8 +275,8 @@ async function getLightBillQuoteForMonth(req, tenant = {}, monthKey = "") {
     };
   }
 
-  if (mode === "room_meter_split") {
-    const bills = await hostelRoomBills(req, tenant, range);
+  if (["room_meter_split", "room_meter_rate", "room_meter_actual_bill"].includes(mode)) {
+    const bills = await hostelRoomBills(req, tenant, range, monthKey);
     const members = await activeTenantCount(req, tenant, range, "room");
     const includedUnits = Number(settings.includedUnits || 0);
     const billParts = bills.map((bill) => meterBreakdownForBill(bill, settings));
@@ -225,7 +314,7 @@ async function getLightBillQuoteForMonth(req, tenant = {}, monthKey = "") {
   }
 
   if (mode === "included_extra_split") {
-    const bills = await hostelRoomBills(req, tenant, range);
+    const bills = await hostelRoomBills(req, tenant, range, monthKey);
     const total = billTotal(bills);
     const members = await activeTenantCount(req, tenant, range, "room");
     const includedAmount = Number(settings.includedAmount || 0);
@@ -246,7 +335,7 @@ async function getLightBillQuoteForMonth(req, tenant = {}, monthKey = "") {
   }
 
   if (mode === "common_meter_split") {
-    const bills = await commonHostelBills(req, range);
+    const bills = await commonHostelBills(req, range, monthKey);
     const total = billTotal(bills);
     const members = await activeTenantCount(req, tenant, range, "all");
     const expected = Math.round(total / members);
@@ -276,5 +365,6 @@ function splitCollectedAmount(totalAmount, rentBalance, canteenBalance, lightBil
 
 module.exports = {
   getLightBillQuoteForMonth,
+  getLightBillCollectionSummary,
   splitCollectedAmount,
 };

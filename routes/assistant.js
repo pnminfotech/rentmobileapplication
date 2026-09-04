@@ -34,7 +34,13 @@ const expectFromTenant = (tenant, roomsData) => {
   if (v) return v;
 
   if (roomsData && tenant?.roomNo && tenant?.bedNo) {
-    const room = roomsData.find(r => String(r.roomNo) === String(tenant.roomNo));
+    const room = (tenant.roomId && roomsData.find(r => String(r.id) === String(tenant.roomId)))
+      || roomsData.find(r =>
+        String(r.roomNo) === String(tenant.roomNo) &&
+        String(r.propertyType || "bed") === String(tenant.propertyType || "bed") &&
+        String(r.category || "") === String(tenant.category || "") &&
+        String(r.wingName || "") === String(tenant.wingName || "")
+      );
     const bed  = room?.beds?.find(b => String(b.bedNo) === String(tenant.bedNo));
     return (
       toNum(bed?.price) ||
@@ -108,6 +114,10 @@ const getPendingMonthsForStatus = (rents = [], joiningDateStr) => {
 // Build compact “facts” for the LLM (avoid sending whole DB if huge)
 function makeFacts({ tenants, rooms }) {
   const roomsData = rooms.map(r => ({
+    id: r._id?.toString?.() || "",
+    propertyType: r.propertyType || "bed",
+    category: r.category || "",
+    wingName: r.wingName || "",
     roomNo: String(r.roomNo),
     floorNo: r.floorNo,
     beds: (r.beds || []).map(b => ({
@@ -130,6 +140,10 @@ function makeFacts({ tenants, rooms }) {
       phoneNo: t.phoneNo || "",
       roomNo: String(t.roomNo || ""),
       bedNo: String(t.bedNo || ""),
+      roomId: String(t.roomId || ""),
+      propertyType: t.propertyType || "bed",
+      category: t.category || "",
+      wingName: t.wingName || "",
       depositAmount: toNum(t.depositAmount || 0),
       joiningDate: t.joiningDate ? new Date(t.joiningDate).toISOString().slice(0, 10) : null,
       leaveDate: t.leaveDate ? new Date(t.leaveDate).toISOString().slice(0, 10) : null,
@@ -148,7 +162,12 @@ function makeFacts({ tenants, rooms }) {
     (r.beds || []).forEach(b => {
       const taken = tenants.some(
         t =>
-          String(t.roomNo) === r.roomNo &&
+          ((t.roomId && String(t.roomId) === r.id) ||
+            (!t.roomId &&
+              String(t.roomNo) === r.roomNo &&
+              String(t.propertyType || "bed") === String(r.propertyType || "bed") &&
+              String(t.category || "") === String(r.category || "") &&
+              String(t.wingName || "") === String(r.wingName || ""))) &&
           String(t.bedNo) === b.bedNo &&
           !t.leaveDate
       );
@@ -177,10 +196,10 @@ router.post("/ask", async (req, res) => {
     // Pull current data (small projection for privacy/perf)
     const [tenants, rooms] = await Promise.all([
       Form.find({}, {
-        name: 1, phoneNo: 1, roomNo: 1, bedNo: 1, depositAmount: 1,
+        name: 1, phoneNo: 1, propertyType: 1, roomId: 1, category: 1, wingName: 1, roomNo: 1, bedNo: 1, depositAmount: 1,
         joiningDate: 1, leaveDate: 1, baseRent: 1, rents: 1
       }).lean(),
-      Room.find({}, { roomNo: 1, floorNo: 1, beds: 1 }).lean()
+      Room.find({}, { propertyType: 1, category: 1, wingName: 1, roomNo: 1, floorNo: 1, beds: 1 }).lean()
     ]);
 
     const world = makeFacts({ tenants, rooms });
