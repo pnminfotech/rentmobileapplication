@@ -218,7 +218,13 @@ async function syncMeterState(req, bill) {
 
   const roomFilter = bill.roomId
     ? { _id: bill.roomId }
-    : { propertyType: bill.propertyType || "bed", roomNo: normalizeIdentifier(bill.roomNo) };
+    : {
+        propertyType: bill.propertyType || "bed",
+        roomNo: normalizeIdentifier(bill.roomNo),
+        ...(bill.category ? { category: bill.category } : {}),
+        ...(bill.wingName ? { wingName: bill.wingName } : {}),
+        ...(bill.floorNo ? { floorNo: bill.floorNo } : {}),
+      };
   if (roomUpdate.meterNo) {
     const currentRoom = await Room.findOne(scopedQuery(req, roomFilter));
     const duplicateMeter = await Room.findOne(scopedQuery(req, {
@@ -263,6 +269,9 @@ router.put('/:id', async (req, res) => {
       const nextRoomId = updatePayload.roomId ?? current.roomId;
       const nextPropertyType = updatePayload.propertyType || current.propertyType || "bed";
       const nextRoomNo = updatePayload.roomNo ?? current.roomNo ?? "";
+      const nextCategory = updatePayload.category ?? current.category ?? "";
+      const nextWingName = updatePayload.wingName ?? current.wingName ?? "";
+      const nextFloorNo = updatePayload.floorNo ?? current.floorNo ?? "";
       const duplicateFilter = scopedQuery(req, {
         _id: { $ne: req.params.id },
         propertyType: nextPropertyType,
@@ -271,7 +280,12 @@ router.put('/:id', async (req, res) => {
       });
       const normalizedNextRoomNo = normalizeIdentifier(nextRoomNo);
       if (nextRoomId) duplicateFilter.roomId = nextRoomId;
-      else duplicateFilter.roomNo = normalizedNextRoomNo;
+      else {
+        duplicateFilter.roomNo = normalizedNextRoomNo;
+        if (nextCategory) duplicateFilter.category = nextCategory;
+        if (nextWingName) duplicateFilter.wingName = nextWingName;
+        if (nextFloorNo) duplicateFilter.floorNo = nextFloorNo;
+      }
 
       const duplicate = await LightBillEntry.findOne(duplicateFilter);
       if (duplicate) {
@@ -357,23 +371,31 @@ router.get('/all-bills', async (req, res) => {
             ...(roomIds.length ? [{ _id: { $in: roomIds } }] : []),
             ...legacyUnitQueries,
           ],
-        })).select("propertyType category wingName floorNo roomNo").lean()
+        })).select("propertyType category wingName floorNo roomNo meterNo").lean()
       : [];
     const roomsById = new Map(rooms.map((room) => [String(room._id), room]));
     const enrichedBills = await Promise.all(bills.map(async (bill) => {
+      const roomCandidates = bill.roomId ? [] : rooms.filter((item) =>
+        String(item.propertyType || "bed") === String(bill.propertyType || "bed") &&
+        String(item.roomNo || "") === String(bill.roomNo || "") &&
+        (!bill.category || String(item.category || "") === String(bill.category)) &&
+        (!bill.wingName || String(item.wingName || "") === String(bill.wingName))
+      );
+      const meterMatch = bill.meterNo
+        ? roomCandidates.find((item) => normalizeIdentifier(item.meterNo) === normalizeIdentifier(bill.meterNo))
+        : null;
       const room = bill.roomId
         ? roomsById.get(String(bill.roomId))
-        : rooms.find((item) =>
-            String(item.propertyType || "bed") === String(bill.propertyType || "bed") &&
-            String(item.roomNo || "") === String(bill.roomNo || "") &&
-            (!bill.category || String(item.category || "") === String(bill.category))
-          );
-      return {
+        : meterMatch || (roomCandidates.length === 1 ? roomCandidates[0] : null);
+      const enrichedBill = {
         ...bill,
         category: bill.category || room?.category || "",
         wingName: bill.wingName || room?.wingName || "",
         floorNo: bill.floorNo || room?.floorNo || "",
-        tenantCollection: await getLightBillCollectionSummary(req, bill),
+      };
+      return {
+        ...enrichedBill,
+        tenantCollection: await getLightBillCollectionSummary(req, enrichedBill),
       };
     }));
     res.json(enrichedBills);

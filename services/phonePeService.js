@@ -217,7 +217,6 @@ async function createPhonePePayment({ transaction, organization, subscription })
   const checkoutPageUrl = config.checkoutBaseUrl
     ? `${config.checkoutBaseUrl}/api/phonepe/checkout/${transaction._id}`
     : "";
-
   return {
     provider: "phonepe",
     status: "pending",
@@ -229,6 +228,7 @@ async function createPhonePePayment({ transaction, organization, subscription })
     amount: transaction.amount,
     amountInPaise: amount,
     currency: transaction.currency || "INR",
+    testMode: config.env === "uat",
     raw: data,
   };
 }

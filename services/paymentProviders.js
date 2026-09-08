@@ -32,10 +32,12 @@ async function createPaymentIntent({ transaction, organization, subscription }) 
     };
   }
 
+  const mockSuccessUrl = buildMockPaymentUrl(transaction);
   return {
     provider: "mock",
     status: "pending",
-    paymentUrl: buildMockPaymentUrl(transaction),
+    paymentUrl: mockSuccessUrl,
+    mockSuccessUrl,
     merchantTransactionId: transaction.merchantTransactionId,
     amount: transaction.amount,
     currency: transaction.currency,

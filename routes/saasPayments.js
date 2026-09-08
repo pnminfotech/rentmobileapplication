@@ -643,18 +643,20 @@ router.get("/:transactionId/status", requireSystemAuth, async (req, res) => {
 async function handleMockSuccess(req, res) {
   try {
     const paymentProvider = String(process.env.PAYMENT_PROVIDER || "mock").toLowerCase();
-    const phonePeEnv = String(process.env.PHONEPE_ENV || "").toLowerCase();
-    const allowPhonePeUatSuccess =
-      paymentProvider === "phonepe" &&
-      phonePeEnv === "uat" &&
-      String(process.env.PHONEPE_ALLOW_UAT_SUCCESS || "").toLowerCase() === "true";
 
-    if (paymentProvider !== "mock" && !allowPhonePeUatSuccess) {
+    if (paymentProvider !== "mock") {
       return res.status(403).json({ message: "Test payment completion is disabled" });
     }
 
     const transaction = await BillingTransaction.findById(req.params.transactionId);
     if (!transaction) return res.status(404).json({ message: "Payment transaction not found" });
+
+    const transactionProvider = String(
+      transaction.responsePayload?.provider || transaction.requestPayload?.provider || transaction.provider || ""
+    ).toLowerCase();
+    if (transactionProvider !== "mock") {
+      return res.status(403).json({ message: "Only mock-provider transactions can be completed manually" });
+    }
 
     if (transaction.status === "success") {
       const subscription = await Subscription.findById(transaction.subscriptionId);
@@ -662,7 +664,7 @@ async function handleMockSuccess(req, res) {
     }
 
     const subscription = await activatePaidSubscription(transaction, {
-      source: allowPhonePeUatSuccess ? "phonepe-uat-test" : "mock",
+      source: "mock",
       status: "success",
       body: req.body || {},
     });
@@ -670,9 +672,7 @@ async function handleMockSuccess(req, res) {
     res.json({
       transaction,
       subscription,
-      message: allowPhonePeUatSuccess
-        ? "PhonePe UAT test payment marked successful. Subscription activated."
-        : "Mock payment successful. Subscription activated.",
+      message: "Mock payment successful. Subscription activated.",
     });
   } catch (err) {
     console.error("mock payment success error:", err);
@@ -729,25 +729,33 @@ async function handlePhonePeWebhook(req, res) {
       return res.status(404).json({ ok: false, message: "Payment transaction not found" });
     }
 
+    if (transaction.status === "success") {
+      const subscription = await Subscription.findById(transaction.subscriptionId);
+      return res.json({ ok: true, transaction, subscription });
+    }
+
+    const providerStatus = await checkPhonePeOrderStatus(mapped.merchantOrderId);
     transaction.callbackPayload = {
       source: "phonepe-webhook",
       receivedAt: new Date(),
       mapped,
+      providerStatus,
       body: req.body || {},
       headers: {
         authorization: req.get("authorization") || "",
         xVerify: req.get("x-verify") || req.get("x-verify-response") || "",
       },
     };
-    transaction.status = mapped.status;
+    transaction.status = providerStatus.status;
     await transaction.save();
 
     let subscription = await Subscription.findById(transaction.subscriptionId);
-    if (mapped.status === "success") {
+    if (providerStatus.status === "success") {
       subscription = await activatePaidSubscription(transaction, {
         source: "phonepe-webhook",
-        status: mapped.status,
+        status: providerStatus.status,
         webhook: mapped,
+        providerStatus,
       });
     }
 

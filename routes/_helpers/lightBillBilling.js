@@ -80,8 +80,7 @@ async function linkedBills(req, tenant = {}, type, range, mode = "", monthKey = 
     ...billingMonthFilter(monthKey, range),
   };
   if (mode) query.billingMode = { $in: [mode, null, ""] };
-  if (tenant.roomId) query.roomId = tenant.roomId;
-  else query.roomNo = tenant.roomNo || "";
+  Object.assign(query, unitLocationQuery(tenant, type));
   return LightBillEntry.find(scopedQuery(req, query)).lean();
 }
 

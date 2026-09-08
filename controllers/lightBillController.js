@@ -90,6 +90,9 @@ exports.createLightBill = async (req, res) => {
       isUnitLinked,
       roomId,
       propertyType,
+      category,
+      wingName,
+      floorNo,
       roomNo,
       meterNo,
       previousReading,
@@ -114,6 +117,9 @@ exports.createLightBill = async (req, res) => {
     const normalizedRoomNo = linkedToUnit ? normalizeIdentifier(roomNo) : "";
     const normalizedMeterNo = normalizeIdentifier(meterNo);
     const normalizedPropertyType = propertyType || "bed";
+    const normalizedCategory = normalizeText(category);
+    const normalizedWingName = normalizeText(wingName);
+    const normalizedFloorNo = normalizeText(floorNo);
     const numericAmount = Number(amount ?? salary ?? 0);
     const numericPreviousReading = previousReading === undefined || previousReading === "" ? null : Number(previousReading);
     const numericTotalReading = totalReading === undefined || totalReading === "" ? null : Number(totalReading);
@@ -165,9 +171,18 @@ exports.createLightBill = async (req, res) => {
     const linkedRoom = linkedToUnit
       ? await Room.findOne(scopedQuery(req, roomId
         ? { _id: roomId }
-        : { propertyType: normalizedPropertyType, roomNo: normalizedRoomNo }
+        : {
+            propertyType: normalizedPropertyType,
+            roomNo: normalizedRoomNo,
+            ...(normalizedCategory ? { category: normalizedCategory } : {}),
+            ...(normalizedWingName ? { wingName: normalizedWingName } : {}),
+          }
       )).lean()
       : null;
+    if (linkedToUnit && !linkedRoom) {
+      return res.status(400).json({ message: "Selected room/unit was not found" });
+    }
+    const linkedRoomId = linkedRoom?._id || null;
 
     if (linkedToUnit) {
       const filter = scopedQuery(req, {
@@ -175,14 +190,10 @@ exports.createLightBill = async (req, res) => {
         propertyType: normalizedPropertyType,
         billingMonth: normalizedBillingMonth,
       });
-      if (roomId) {
-        filter.roomId = roomId;
-      } else {
-        filter.roomNo = normalizedRoomNo;
-        if (linkedRoom?.category) filter.category = linkedRoom.category;
-        if (linkedRoom?.wingName) filter.wingName = linkedRoom.wingName;
-        if (linkedRoom?.floorNo) filter.floorNo = linkedRoom.floorNo;
-      }
+      filter.roomNo = normalizeIdentifier(linkedRoom?.roomNo || normalizedRoomNo);
+      if (linkedRoom?.category) filter.category = linkedRoom.category;
+      if (linkedRoom?.wingName) filter.wingName = linkedRoom.wingName;
+      if (linkedRoom?.floorNo) filter.floorNo = linkedRoom.floorNo;
 
       const existing = await LightBillEntry.findOne(filter);
       if (existing) {
@@ -204,6 +215,8 @@ exports.createLightBill = async (req, res) => {
     if (normalizedType === "meter" && linkedToUnit && normalizedMeterNo) {
       const roomFilter = roomId
         ? { _id: roomId }
+        : linkedRoom?._id
+        ? { _id: linkedRoom._id }
         : { propertyType: normalizedPropertyType, roomNo: normalizedRoomNo };
       const currentRoom = await Room.findOne(scopedQuery(req, roomFilter));
       const duplicateMeter = await Room.findOne(scopedQuery(req, {
@@ -221,11 +234,11 @@ exports.createLightBill = async (req, res) => {
       billPayer: normalizedBillPayer,
       billingMode: normalizedBillingMode,
       isUnitLinked: linkedToUnit,
-      roomId: linkedToUnit && roomId ? roomId : null,
+      roomId: linkedToUnit ? linkedRoomId : null,
       propertyType: normalizedPropertyType,
-      category: linkedRoom?.category || "",
-      wingName: linkedRoom?.wingName || "",
-      floorNo: linkedRoom?.floorNo || "",
+      category: linkedRoom?.category || normalizedCategory,
+      wingName: linkedRoom?.wingName || normalizedWingName,
+      floorNo: linkedRoom?.floorNo || normalizedFloorNo,
       roomNo: normalizedRoomNo,
       meterNo: normalizedMeterNo,
       previousReading: numericPreviousReading,
@@ -255,6 +268,8 @@ exports.createLightBill = async (req, res) => {
       if (Object.keys(roomUpdate).length) {
         const roomFilter = roomId
           ? { _id: roomId }
+          : linkedRoom?._id
+          ? { _id: linkedRoom._id }
           : { propertyType: normalizedPropertyType, roomNo: normalizedRoomNo };
         await Room.findOneAndUpdate(scopedQuery(req, roomFilter), { $set: scopedUpdate(req, roomUpdate) });
       }

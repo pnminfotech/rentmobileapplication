@@ -94,10 +94,10 @@ async function validateTenantSlotAvailable(req, data = {}, excludeId = null) {
       (slot.roomId && existingSlot.roomId && existingSlot.roomId === slot.roomId) ||
       (existingSlot.category === slot.category &&
         existingSlot.wingName === slot.wingName &&
-      existingSlot.floorNo === slot.floorNo &&
-      existingSlot.roomNo === slot.roomNo &&
-        existingSlot.bedNo === slot.bedNo);
-    return isSameUnit;
+        existingSlot.floorNo === slot.floorNo &&
+        existingSlot.roomNo === slot.roomNo);
+    if (!isSameUnit) return false;
+    return slot.propertyType !== "bed" || existingSlot.bedNo === slot.bedNo;
   });
 
   if (!occupied) return null;
