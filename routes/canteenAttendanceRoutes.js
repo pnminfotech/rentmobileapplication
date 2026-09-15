@@ -35,6 +35,10 @@ function normalizeMeals(value, fallback = []) {
   return unique.length ? unique : fallback;
 }
 
+function normalizePackageBillingMethod(value) {
+  return String(value || "").trim() === "fixed_monthly" ? "fixed_monthly" : "attendance_day";
+}
+
 function normalizeSettings(input = {}) {
   const requestedModes = [...new Set((Array.isArray(input.activeModes) ? input.activeModes : [])
     .map((mode) => String(mode || "").trim().toLowerCase())
@@ -50,6 +54,7 @@ function normalizeSettings(input = {}) {
     activeModes,
     fullPackage: {
       monthlyAmount: toAmount(input.fullPackage?.monthlyAmount),
+      billingMethod: normalizePackageBillingMethod(input.fullPackage?.billingMethod),
       includedMeals: normalizeMeals(input.fullPackage?.includedMeals, ["breakfast", "lunch", "dinner"]),
     },
     perMeal: {
@@ -60,6 +65,7 @@ function normalizeSettings(input = {}) {
     mealPackage: {
       name: String(input.mealPackage?.name || "Meal package").trim() || "Meal package",
       monthlyAmount: toAmount(input.mealPackage?.monthlyAmount),
+      billingMethod: normalizePackageBillingMethod(input.mealPackage?.billingMethod),
       includedMeals: normalizeMeals(input.mealPackage?.includedMeals, ["lunch", "dinner"]),
     },
     guestMeal: {
@@ -89,6 +95,7 @@ function publicSettings(organization) {
     activeModes: Array.isArray(settings.activeModes) ? settings.activeModes : [],
     fullPackage: {
       monthlyAmount: Number(settings.fullPackage?.monthlyAmount || 0),
+      billingMethod: normalizePackageBillingMethod(settings.fullPackage?.billingMethod),
       includedMeals: normalizeMeals(settings.fullPackage?.includedMeals, ["breakfast", "lunch", "dinner"]),
     },
     perMeal: {
@@ -99,6 +106,7 @@ function publicSettings(organization) {
     mealPackage: {
       name: settings.mealPackage?.name || "Meal package",
       monthlyAmount: Number(settings.mealPackage?.monthlyAmount || 0),
+      billingMethod: normalizePackageBillingMethod(settings.mealPackage?.billingMethod),
       includedMeals: normalizeMeals(settings.mealPackage?.includedMeals, ["lunch", "dinner"]),
     },
     guestMeal: {
@@ -108,6 +116,38 @@ function publicSettings(organization) {
     },
     updatedAt: settings.updatedAt || null,
   };
+}
+
+function settingsSnapshot(settings = {}) {
+  return {
+    isConfigured: Boolean(settings.isConfigured),
+    activeModes: Array.isArray(settings.activeModes) ? settings.activeModes : [],
+    fullPackage: {
+      monthlyAmount: Number(settings.fullPackage?.monthlyAmount || 0),
+      billingMethod: normalizePackageBillingMethod(settings.fullPackage?.billingMethod),
+      includedMeals: normalizeMeals(settings.fullPackage?.includedMeals, ["breakfast", "lunch", "dinner"]),
+    },
+    perMeal: {
+      breakfast: Number(settings.perMeal?.breakfast || 0),
+      lunch: Number(settings.perMeal?.lunch || 0),
+      dinner: Number(settings.perMeal?.dinner || 0),
+    },
+    mealPackage: {
+      name: settings.mealPackage?.name || "Meal package",
+      monthlyAmount: Number(settings.mealPackage?.monthlyAmount || 0),
+      billingMethod: normalizePackageBillingMethod(settings.mealPackage?.billingMethod),
+      includedMeals: normalizeMeals(settings.mealPackage?.includedMeals, ["lunch", "dinner"]),
+    },
+    guestMeal: {
+      breakfast: Number(settings.guestMeal?.breakfast || 0),
+      lunch: Number(settings.guestMeal?.lunch || 0),
+      dinner: Number(settings.guestMeal?.dinner || 0),
+    },
+  };
+}
+
+function settingsChanged(previous = {}, next = {}) {
+  return JSON.stringify(settingsSnapshot(previous)) !== JSON.stringify(settingsSnapshot(next));
 }
 
 function configuredMeals(organization) {
@@ -159,11 +199,26 @@ router.put("/settings", async (req, res) => {
     const { settings, errors } = normalizeSettings(req.body || {});
     if (errors.length) return res.status(400).json({ message: errors.join(". ") });
 
-    const organization = await Organization.findOneAndUpdate(
-      { _id: req.organizationId },
-      { $set: { canteenSettings: settings } },
-      { new: true, runValidators: true }
-    );
+    const existing = await Organization.findOne({ _id: req.organizationId });
+    if (!existing) return res.status(404).json({ message: "Organization not found" });
+
+    const now = new Date();
+    const history = Array.isArray(existing.canteenSettingsHistory) ? [...existing.canteenSettingsHistory] : [];
+    if (settingsChanged(existing.canteenSettings || {}, settings)) {
+      if (!history.length && existing.canteenSettings?.isConfigured) {
+        history.push({
+          effectiveFrom: existing.canteenSettings.updatedAt || existing.updatedAt || existing.createdAt || now,
+          settings: existing.canteenSettings,
+        });
+      }
+      history.push({ effectiveFrom: now, settings });
+    } else if (!history.length && settings.isConfigured) {
+      history.push({ effectiveFrom: settings.updatedAt || now, settings });
+    }
+
+    existing.canteenSettings = settings;
+    existing.canteenSettingsHistory = history;
+    const organization = await existing.save();
     if (!organization) return res.status(404).json({ message: "Organization not found" });
 
     res.json({ message: "Canteen settings saved", settings: publicSettings(organization) });

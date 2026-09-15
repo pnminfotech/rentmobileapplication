@@ -94,6 +94,7 @@ async function createNotification(payload, options = {}) {
     entityType: normalizedEntityType,
     entityId: normalizedEntityId,
     actionType: normalizedActionType,
+    status: { $ne: "resolved" },
   }).sort({ createdAt: -1 });
 
   if (existing) {

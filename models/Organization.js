@@ -35,6 +35,11 @@ const canteenSettingsSchema = new mongoose.Schema(
     },
     fullPackage: {
       monthlyAmount: { type: Number, default: 0, min: 0 },
+      billingMethod: {
+        type: String,
+        enum: ["attendance_day", "fixed_monthly"],
+        default: "attendance_day",
+      },
       includedMeals: {
         type: [String],
         enum: ["breakfast", "lunch", "dinner"],
@@ -45,6 +50,11 @@ const canteenSettingsSchema = new mongoose.Schema(
     mealPackage: {
       name: { type: String, trim: true, default: "Meal package" },
       monthlyAmount: { type: Number, default: 0, min: 0 },
+      billingMethod: {
+        type: String,
+        enum: ["attendance_day", "fixed_monthly"],
+        default: "attendance_day",
+      },
       includedMeals: {
         type: [String],
         enum: ["breakfast", "lunch", "dinner"],
@@ -53,6 +63,14 @@ const canteenSettingsSchema = new mongoose.Schema(
     },
     guestMeal: { type: mealPriceSchema, default: () => ({}) },
     updatedAt: { type: Date },
+  },
+  { _id: false }
+);
+
+const canteenSettingsHistorySchema = new mongoose.Schema(
+  {
+    effectiveFrom: { type: Date, default: Date.now, index: true },
+    settings: { type: canteenSettingsSchema, default: () => ({}) },
   },
   { _id: false }
 );
@@ -123,6 +141,10 @@ const organizationSchema = new mongoose.Schema(
     unitAllocation: { type: unitAllocationSchema, default: () => ({}) },
     features: { type: featureSchema, default: () => ({}) },
     canteenSettings: { type: canteenSettingsSchema, default: () => ({}) },
+    canteenSettingsHistory: {
+      type: [canteenSettingsHistorySchema],
+      default: [],
+    },
     lightBillSettings: { type: lightBillSettingsSchema, default: () => ({}) },
     status: {
       type: String,

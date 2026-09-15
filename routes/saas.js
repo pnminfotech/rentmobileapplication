@@ -890,6 +890,10 @@ router.post(
       });
 
       await Promise.allSettled([
+        resolveNotifications({
+          organizationId: req.organizationId,
+          actionType: "subscription_upgrade_success",
+        }),
         notifyOrganization(req.organizationId, {
           type: "renewal_request",
           title: "Upgrade payment created",
@@ -1521,8 +1525,8 @@ router.post(
           title: "Package upgraded",
           message: `Your package has been upgraded. New units: ${newUnits.beds} beds, ${newUnits.rooms} rooms, ${newUnits.shops} shops.`,
           priority: "high",
-          entityType: "subscription",
-          entityId: subscription._id,
+          entityType: "payment",
+          entityId: transaction._id,
           actionType: "subscription_upgrade_success",
           expiresAt: addDays(new Date(), 7),
           payload: {

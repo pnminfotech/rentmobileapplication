@@ -52,6 +52,10 @@ function businessTypeFromUnits(units = {}) {
   return "hostel";
 }
 
+function isFailedPaymentStatus(status) {
+  return ["failed", "cancelled", "canceled"].includes(String(status || "").toLowerCase());
+}
+
 async function resolveSubscriptionPaymentNotifications(subscription, previousSubscription) {
   if (!subscription?._id) return;
   await Promise.allSettled([
@@ -141,8 +145,8 @@ async function applyPaidSubscriptionUpgrade(transaction, payload = {}) {
       title: "Package upgraded",
       message: `Payment received. New package: ${newUnits.beds} beds, ${newUnits.rooms} rooms, ${newUnits.shops} shops.`,
       priority: "high",
-      entityType: "subscription",
-      entityId: subscription._id,
+      entityType: "payment",
+      entityId: transaction._id,
       actionType: "subscription_upgrade_success",
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       payload: {
@@ -150,6 +154,44 @@ async function applyPaidSubscriptionUpgrade(transaction, payload = {}) {
         transactionId: String(transaction._id),
         addedUnits,
         newUnits,
+        amount: transaction.amount,
+        currency: transaction.currency || "INR",
+      },
+    }),
+  ]);
+
+  return subscription;
+}
+
+async function handleUnsuccessfulSubscriptionUpgrade(transaction, payload = {}) {
+  if (transaction.requestPayload?.action !== "subscription_upgrade") return null;
+
+  const subscription = await Subscription.findById(transaction.subscriptionId);
+  if (!subscription) return null;
+
+  const status = String(transaction.status || payload.status || "failed").toLowerCase();
+  const displayStatus = status === "cancelled" || status === "canceled" ? "cancelled" : "failed";
+
+  await Promise.allSettled([
+    resolveNotifications({
+      organizationId: transaction.organizationId,
+      entityType: "subscription",
+      entityId: subscription._id,
+      actionType: "subscription_upgrade_payment_required",
+    }),
+    notifyOrganization(transaction.organizationId, {
+      type: "payment_confirmation",
+      title: "Upgrade payment not completed",
+      message: `Package upgrade was not applied because the payment was ${displayStatus}. Please try again when you are ready.`,
+      priority: "normal",
+      entityType: "payment",
+      entityId: transaction._id,
+      actionType: "subscription_upgrade_payment_failed",
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      payload: {
+        subscriptionId: String(subscription._id),
+        transactionId: String(transaction._id),
+        status: displayStatus,
         amount: transaction.amount,
         currency: transaction.currency || "INR",
       },
@@ -486,6 +528,12 @@ async function handlePhonePeReturn(req, res) {
             status: providerStatus.status,
             providerStatus,
           });
+        } else if (isFailedPaymentStatus(providerStatus.status)) {
+          await handleUnsuccessfulSubscriptionUpgrade(transaction, {
+            source: "phonepe-return",
+            status: providerStatus.status,
+            providerStatus,
+          });
         }
       } catch (pollError) {
         console.error("phonepe return status check error:", pollError);
@@ -563,6 +611,21 @@ router.post("/create", requireSystemAuth, async (req, res) => {
               message: "Existing PhonePe payment confirmed.",
             },
           });
+        } else if (isFailedPaymentStatus(providerStatus.status)) {
+          await handleUnsuccessfulSubscriptionUpgrade(transaction, {
+            source: "phonepe-create-reconcile",
+            status: providerStatus.status,
+            providerStatus,
+          });
+          return res.json({
+            transaction,
+            subscription,
+            payment: {
+              provider: "phonepe",
+              status: providerStatus.status,
+              message: "Existing PhonePe payment was not completed.",
+            },
+          });
         }
       } catch (statusError) {
         console.error("create payment existing status check error:", statusError);
@@ -620,6 +683,12 @@ router.get("/:transactionId/status", requireSystemAuth, async (req, res) => {
       await transaction.save();
       if (providerStatus.status === "success") {
         await activatePaidSubscription(transaction, {
+          source: "phonepe-status",
+          status: providerStatus.status,
+          providerStatus,
+        });
+      } else if (isFailedPaymentStatus(providerStatus.status)) {
+        await handleUnsuccessfulSubscriptionUpgrade(transaction, {
           source: "phonepe-status",
           status: providerStatus.status,
           providerStatus,
@@ -699,6 +768,11 @@ router.post("/mock/fail/:transactionId", async (req, res) => {
       body: req.body || {},
     };
     await transaction.save();
+    await handleUnsuccessfulSubscriptionUpgrade(transaction, {
+      source: "mock",
+      status: "failed",
+      body: req.body || {},
+    });
 
     res.json({
       transaction,
@@ -757,6 +831,13 @@ async function handlePhonePeWebhook(req, res) {
         webhook: mapped,
         providerStatus,
       });
+    } else if (isFailedPaymentStatus(providerStatus.status)) {
+      subscription = await handleUnsuccessfulSubscriptionUpgrade(transaction, {
+        source: "phonepe-webhook",
+        status: providerStatus.status,
+        webhook: mapped,
+        providerStatus,
+      }) || subscription;
     }
 
     return res.json({ ok: true, transaction, subscription });

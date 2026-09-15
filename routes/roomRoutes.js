@@ -269,7 +269,124 @@ router.get("/usage", async (req, res) => {
     });
   }
 });
+// ======================================================
+// RENAME PROPERTY / BUILDING
+// PUT /api/rooms/properties/rename
+// body: { propertyType, oldName, newName }
+// ======================================================
 
+router.put("/properties/rename", async (req, res) => {
+  try {
+    const propertyType = normalizePropertyType(req.body?.propertyType);
+    const oldName = normalizeText(req.body?.oldName);
+    const newName = normalizeText(req.body?.newName);
+
+    if (!oldName || !newName) {
+      return res.status(400).json({
+        message: "Old property name and new property name are required",
+      });
+    }
+
+    // Find all units belonging to this property
+    const sourceUnits = await Room.find(
+      scopedQuery(req, {
+        propertyType,
+        category: oldName,
+      })
+    ).lean();
+
+    if (!sourceUnits.length) {
+      return res.status(404).json({
+        message: "Property not found",
+      });
+    }
+
+    // Check whether new property name already exists
+    // and would create duplicate units
+    if (oldName.toLowerCase() !== newName.toLowerCase()) {
+      const targetUnits = await Room.find(
+        scopedQuery(req, {
+          propertyType,
+          category: newName,
+        })
+      )
+        .collation({ locale: "en", strength: 2 })
+        .lean();
+
+      if (targetUnits.length) {
+        const targetLocations = new Set(
+          targetUnits.map((unit) =>
+            [
+              normalizeText(unit.floorNo).toLowerCase(),
+              normalizeIdentifier(unit.roomNo).toLowerCase(),
+              normalizeText(unit.wingName).toLowerCase(),
+            ].join("::")
+          )
+        );
+
+        const collision = sourceUnits.find((unit) =>
+          targetLocations.has(
+            [
+              normalizeText(unit.floorNo).toLowerCase(),
+              normalizeIdentifier(unit.roomNo).toLowerCase(),
+              normalizeText(unit.wingName).toLowerCase(),
+            ].join("::")
+          )
+        );
+
+        if (collision) {
+          return res.status(400).json({
+            message:
+              "Cannot use this property name because matching units already exist there",
+          });
+        }
+      }
+    }
+
+    // Update property name in ALL rooms/units
+    const roomResult = await Room.updateMany(
+      scopedQuery(req, {
+        propertyType,
+        category: oldName,
+      }),
+      {
+        $set: scopedUpdate(req, {
+          category: newName,
+        }),
+      }
+    );
+
+    // Update property name in ALL tenant records also
+    const tenantResult = await Form.updateMany(
+      scopedQuery(req, {
+        propertyType,
+        category: oldName,
+      }),
+      {
+        $set: scopedUpdate(req, {
+          category: newName,
+        }),
+      }
+    );
+
+    return res.json({
+      message: "Property name updated successfully",
+      oldName,
+      newName,
+      updatedUnits:
+        roomResult.modifiedCount ?? roomResult.nModified ?? 0,
+      updatedTenants:
+        tenantResult.modifiedCount ?? tenantResult.nModified ?? 0,
+    });
+  } catch (err) {
+    console.error("Rename property error:", err);
+
+    return res.status(500).json({
+      message: "Unable to rename property",
+      error: err.message,
+    });
+  }
+});
 router.get("/:roomId", async (req, res) => {
   try {
     const unit = await Room.findOne(scopedQuery(req, { _id: req.params.roomId })).lean();
