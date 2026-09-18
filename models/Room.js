@@ -32,6 +32,7 @@ const RoomSchema = new mongoose.Schema(
     meterNo: { type: String, default: "" },
     lastMeterReading: { type: Number, default: null },
     beds: { type: [BedSchema], default: [] },
+    isPlaceholder: { type: Boolean, default: false, index: true },
   },
   { timestamps: true }
 );

@@ -1082,7 +1082,7 @@ const updateFormById = async (req, res) => {
 
     const allowed = [
       "name","phoneNo","address","joiningDate","dob","relativeAddress1",
-      "propertyType","category","roomId","floorNo","roomNo","bedNo","baseRent","rentAmount","familyMembers","hasCanteen","canteenPlanType","canteenStartDate","canteenMonthlyAmount","canteenIncludedMeals","shopName","shopBusiness","companyAddress","dateOfJoiningCollege","depositAmount",
+      "propertyType","category","roomId","floorNo","roomNo","bedNo","baseRent","rentAmount","familyMembers","hasCanteen","canteenPlanType","canteenStartDate","canteenStatusEffectiveFrom","canteenMonthlyAmount","canteenIncludedMeals","canteenMealPrices","canteenStatusHistory","shopName","shopBusiness","companyAddress","dateOfJoiningCollege","depositAmount",
       "firstRentStatus","firstRentMonth",
       "relative1Relation","relative1Name","relative1Phone",
       "relative2Relation","relative2Name","relative2Phone",
@@ -1103,7 +1103,7 @@ const updateFormById = async (req, res) => {
     update.propertyType = propertyTypeFromTenantData({ ...existing.toObject(), ...update });
     update.intakeStatus = normalizeIntakeStatus(update.intakeStatus || existing.intakeStatus);
 
-    ["dob", "dateOfJoiningCollege", "canteenStartDate", "shiftEffectiveFrom", "shiftDate", "effectiveFrom"].forEach((field) => {
+    ["dob", "dateOfJoiningCollege", "canteenStartDate", "canteenStatusEffectiveFrom", "shiftEffectiveFrom", "shiftDate", "effectiveFrom"].forEach((field) => {
       if (update[field] === "") update[field] = undefined;
     });
     ["phoneNo", "depositAmount", "baseRent", "rentAmount", "familyMembers", "canteenMonthlyAmount"].forEach((field) => {
@@ -1126,11 +1126,22 @@ const updateFormById = async (req, res) => {
     } else if (update.hasCanteen !== undefined) {
       update.hasCanteen = Boolean(update.hasCanteen);
     }
-    if (update.hasCanteen === false) {
-      update.canteenPlanType = "";
-      update.canteenMonthlyAmount = 0;
-      update.canteenIncludedMeals = [];
-      update.canteenStartDate = undefined;
+    if (update.hasCanteen !== undefined) {
+      const history = Array.isArray(existing.canteenStatusHistory) ? existing.canteenStatusHistory.map((entry) => ({
+        enabled: Boolean(entry.enabled),
+        effectiveFrom: entry.effectiveFrom,
+      })) : [];
+      history.push({
+        enabled: update.hasCanteen,
+        effectiveFrom: update.canteenStatusEffectiveFrom || new Date(),
+      });
+      update.canteenStatusHistory = history;
+      delete update.canteenStatusEffectiveFrom;
+      const currentStatus = history
+        .filter((entry) => entry.effectiveFrom && new Date(entry.effectiveFrom) <= new Date())
+        .sort((a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom))
+        .pop();
+      update.hasCanteen = currentStatus ? Boolean(currentStatus.enabled) : Boolean(existing.hasCanteen);
     }
 
     const slotError = await validateTenantSlotAvailable(

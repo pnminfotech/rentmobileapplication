@@ -163,6 +163,15 @@ const formSchema = new mongoose.Schema(
       enum: ["breakfast", "lunch", "dinner"],
       default: [],
     },
+    canteenMealPrices: {
+      breakfast: { type: Number, default: 0, min: 0 },
+      lunch: { type: Number, default: 0, min: 0 },
+      dinner: { type: Number, default: 0, min: 0 },
+    },
+    canteenStatusHistory: {
+      type: [{ enabled: { type: Boolean, required: true }, effectiveFrom: { type: Date, required: true } }],
+      default: [],
+    },
     shopName: { type: String },
     shopBusiness: { type: String },
     companyAddress: { type: String },

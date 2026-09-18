@@ -228,6 +228,12 @@ function todayKey() {
   ].join("-");
 }
 
+function placeholderCapacity(unit) {
+  const type = normalizePropertyType(unit?.propertyType);
+  if (type === "bed") return Array.isArray(unit?.beds) ? Math.max(unit.beds.length, 1) : 1;
+  return 1;
+}
+
 function activeTenantQueryForUnit(room) {
   const propertyType = normalizePropertyType(room.propertyType);
   const endOfToday = new Date();
@@ -251,6 +257,9 @@ function activeTenantQueryForUnit(room) {
 
 router.get("/", async (req, res) => {
   try {
+    if (req.organizationId) {
+      await getUnitQuota(req.organizationId);
+    }
     const rooms = await Room.find(scopedQuery(req)).sort({ floorNo: 1, roomNo: 1 });
     res.json(rooms);
   } catch (err) {
@@ -475,6 +484,7 @@ router.post("/", async (req, res) => {
       floorNo: flr,
       roomNo: rno,
       wingName: normalizedWingName,
+      isPlaceholder: { $ne: true },
     })).collation({ locale: "en", strength: 2 });
 
     if (existing) {
@@ -496,7 +506,6 @@ router.post("/", async (req, res) => {
         : normalizedPropertyType === "room"
           ? { rooms: 1 }
           : { shops: 1 };
-    await assertUnitCapacity(req.organizationId, requestedUnits);
 
     const beds =
       normalizedPropertyType === "bed"
@@ -510,8 +519,51 @@ router.post("/", async (req, res) => {
               bedNo: normalizedPropertyType === "shop" ? "SHOP-1" : "ROOM-1",
               bedCategory: "Primary",
               price: normalizedPrice,
-            },
-          ];
+          },
+        ];
+
+    const neededCapacity =
+      normalizedPropertyType === "bed" ? normalizedBedCount : 1;
+    const placeholders = await Room.find(scopedQuery(req, {
+      propertyType: normalizedPropertyType,
+      isPlaceholder: true,
+    })).sort({ createdAt: 1 });
+    const availablePlaceholderCapacity = placeholders.reduce((sum, unit) => sum + placeholderCapacity(unit), 0);
+
+    if (availablePlaceholderCapacity < neededCapacity) {
+      await assertUnitCapacity(req.organizationId, requestedUnits);
+    }
+
+    if (placeholders.length && availablePlaceholderCapacity >= neededCapacity) {
+      const [primaryPlaceholder, ...extraPlaceholders] = placeholders;
+      const primaryPlaceholderCapacity = placeholderCapacity(primaryPlaceholder);
+      primaryPlaceholder.category = cat;
+      primaryPlaceholder.hasWing = normalizedHasWing;
+      primaryPlaceholder.wingName = normalizedWingName;
+      primaryPlaceholder.floorNo = flr;
+      primaryPlaceholder.flatType = normalizedFlatType;
+      primaryPlaceholder.roomNo = rno;
+      primaryPlaceholder.meterNo = normalizedMeterNo;
+      primaryPlaceholder.lastMeterReading = normalizedLastMeterReading;
+      primaryPlaceholder.beds = beds;
+      primaryPlaceholder.isPlaceholder = false;
+      await primaryPlaceholder.save();
+
+      if (normalizedPropertyType === "bed" && neededCapacity > 1) {
+        let remainingToConsume = neededCapacity - primaryPlaceholderCapacity;
+        const deleteIds = [];
+        for (const placeholder of extraPlaceholders) {
+          if (remainingToConsume <= 0) break;
+          remainingToConsume -= placeholderCapacity(placeholder);
+          deleteIds.push(placeholder._id);
+        }
+        if (deleteIds.length) {
+          await Room.deleteMany(scopedQuery(req, { _id: { $in: deleteIds }, isPlaceholder: true }));
+        }
+      }
+
+      return res.status(201).json(primaryPlaceholder);
+    }
 
     const room = await Room.create(scopedCreate(req, {
       propertyType: normalizedPropertyType,
@@ -524,6 +576,7 @@ router.post("/", async (req, res) => {
       meterNo: normalizedMeterNo,
       lastMeterReading: normalizedLastMeterReading,
       beds,
+      isPlaceholder: false,
     }));
     return res.status(201).json(room);
   } catch (err) {
@@ -868,9 +921,20 @@ router.put("/:roomId", async (req, res) => {
       roomNo: update.roomNo ?? currentRoom.roomNo,
       wingName: update.hasWing === false ? "" : update.wingName ?? currentRoom.wingName ?? "",
     };
+    const completesPlaceholder =
+      currentRoom.isPlaceholder &&
+      normalizeText(nextLocation.category).toLowerCase() !== "unassigned" &&
+      normalizeText(nextLocation.floorNo).toLowerCase() !== "unassigned" &&
+      normalizeIdentifier(nextLocation.roomNo) &&
+      !normalizeIdentifier(nextLocation.roomNo).startsWith("UNASSIGNED-");
+    if (completesPlaceholder) {
+      update.isPlaceholder = false;
+    }
+
     const duplicateUnit = await Room.findOne(scopedQuery(req, {
       ...nextLocation,
       _id: { $ne: roomId },
+      isPlaceholder: { $ne: true },
     })).collation({ locale: "en", strength: 2 });
     if (duplicateUnit) {
       return res.status(400).json({ message: "Unit already exists in this location" });

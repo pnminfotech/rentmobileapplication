@@ -1,0 +1,1149 @@
+﻿Yes. I reviewed the System Admin files you shared, and for this app I would not build the chatbot around a small FAQ list. Your bot needs to understand intent + entity + filter + time period + action, because users will ask the same thing in hundreds of ways.
+Your app already spans hostel beds, residential rooms and commercial shops; tenant admission/editing; rent/payment status; vacancies; tenant shifting; leave settlement and deposit deduction; tenant documents; former-tenant restore; unit/bed management; canteen; staff/other expenses; wallet/referrals; subscription/account functions, etc. For example, your tenant flow distinguishes vacant units and property types, while leave calculates pending rent against deposit and the shift flow finds a new vacancy.
+So I would design the question bank like this.
+1. Dashboard / overall business
+These should work in all three languages and also mixed language.
+English
+	Marathi
+	Hindi
+	How many tenants do I have?
+	माझ्याकडे एकूण किती tenants आहेत?
+	मेरे पास कुल कितने tenants हैं?
+	How many active tenants are there?
+	Active tenants किती आहेत?
+	Active tenants कितने हैं?
+	How many beds do I have?
+	एकूण beds किती आहेत?
+	कुल beds कितने हैं?
+	How many rooms do I have?
+	एकूण rooms किती आहेत?
+	कुल rooms कितने हैं?
+	How many shops do I have?
+	एकूण shops किती आहेत?
+	कुल shops कितनी हैं?
+	How many units are occupied?
+	किती units occupied आहेत?
+	कितने units occupied हैं?
+	How many units are vacant?
+	किती units रिकामे आहेत?
+	कितने units खाली हैं?
+	Show today's summary
+	आजचा summary दाखव
+	आज का summary दिखाओ
+	Give me overall business summary
+	पूर्ण business summary दे
+	पूरा business summary दो
+	What needs my attention today?
+	आज काय pending आहे?
+	आज क्या pending है?
+	What's happening in my hostel?
+	Hostel ची current situation काय आहे?
+	Hostel की current situation क्या है?
+	Give me this month's summary
+	या महिन्याचा summary दे
+	इस महीने का summary दो
+	Compare this month with last month
+	हा महिना मागच्या महिन्याशी compare कर
+	इस महीने को पिछले महीने से compare करो
+	Also support shorthand:
+summary, dashboard, status, today status, aaj ka status, आजचं काय, overall, business kaisa hai, hostel status.
+________________
+
+
+2. Tenant count & tenant search
+Your tenant list already works with active tenants, rent information, vacancies, property grouping and searches.
+Questions:
+English
+	Marathi
+	Hindi
+	Show all tenants
+	सगळे tenants दाखव
+	सभी tenants दिखाओ
+	Find Rahul Sharma
+	Rahul Sharma ला शोध
+	Rahul Sharma को ढूंढो
+	Search tenant by phone number
+	Phone number वरून tenant शोध
+	Phone number से tenant ढूंढो
+	Who stays in room 205?
+	Room 205 मध्ये कोण राहतं?
+	Room 205 में कौन रहता है?
+	Who is on bed B2?
+	B2 bed वर कोण आहे?
+	B2 bed पर कौन है?
+	Show tenants in A Wing
+	A Wing मधले tenants दाखव
+	A Wing के tenants दिखाओ
+	Show tenants on first floor
+	First floor चे tenants दाखव
+	First floor के tenants दिखाओ
+	Show hostel tenants
+	Hostel tenants दाखव
+	Hostel tenants दिखाओ
+	Show residential tenants
+	Residential tenants दाखव
+	Residential tenants दिखाओ
+	Show shop tenants
+	Shop tenants दाखव
+	Shop tenants दिखाओ
+	How many tenants are in Building A?
+	Building A मध्ये किती tenants आहेत?
+	Building A में कितने tenants हैं?
+	Give me Rahul's details
+	Rahul ची पूर्ण माहिती दे
+	Rahul की पूरी जानकारी दो
+	What is Rahul's phone number?
+	Rahul चा mobile number काय आहे?
+	Rahul का mobile number क्या है?
+	Where does Rahul stay?
+	Rahul कुठे राहतो?
+	Rahul कहाँ रहता है?
+	Which room is Rahul in?
+	Rahul कोणत्या room मध्ये आहे?
+	Rahul कौनसे room में है?
+	What is Rahul's bed number?
+	Rahul चा bed number काय आहे?
+	Rahul का bed number क्या है?
+	When did Rahul join?
+	Rahul कधी join झाला?
+	Rahul कब join हुआ?
+	What is Rahul's joining date?
+	Rahul ची joining date काय आहे?
+	Rahul की joining date क्या है?
+	What is Rahul's deposit?
+	Rahul चा deposit किती आहे?
+	Rahul का deposit कितना है?
+	What is Rahul's monthly rent?
+	Rahul चं monthly rent किती आहे?
+	Rahul का monthly rent कितना है?
+	Does Rahul have canteen?
+	Rahul कडे canteen आहे का?
+	Rahul का canteen चालू है क्या?
+	The bot should understand incomplete queries too:
+Rahul?
+Rahul rent
+Rahul room
+Rahul deposit
+Rahul payment
+Rahul documents
+Rahul leave
+Rahul mobile
+205 kon ahe
+B2 pe kaun hai
+________________
+
+
+3. Add tenant / admission
+Your app supports tenant creation against vacant hostel/residential/commercial units and can collect rent/deposit/address/canteen information.
+Questions/commands:
+English
+	Marathi
+	Hindi
+	Add a new tenant
+	नवीन tenant add कर
+	नया tenant add करो
+	Add tenant to room 205
+	Room 205 मध्ये tenant add कर
+	Room 205 में tenant add करो
+	Add tenant to B2
+	B2 वर tenant add कर
+	B2 पर tenant add करो
+	Add a shop tenant
+	Shop tenant add कर
+	Shop tenant add करो
+	Add residential tenant
+	Residential tenant add कर
+	Residential tenant add करो
+	Which units are available for a new tenant?
+	नवीन tenant साठी कोणते units available आहेत?
+	नए tenant के लिए कौनसे units available हैं?
+	What information is required to add a tenant?
+	Tenant add करायला कोणती माहिती लागते?
+	Tenant add करने के लिए क्या information चाहिए?
+	Can I add a tenant without canteen?
+	Canteen शिवाय tenant add करू शकतो का?
+	Canteen के बिना tenant add कर सकते हैं?
+	Can I mark advance rent while adding tenant?
+	Tenant add करताना advance rent mark करू शकतो का?
+	Tenant add करते समय advance rent mark कर सकते हैं?
+	Add tenant with normal rent cycle
+	Tenant normal cycle ने add कर
+	Tenant को normal cycle में add करो
+	Also conversational input:
+Add Rahul, 9876543210, room 205, deposit 10000, joining today.
+Bot should extract fields instead of making the admin fill everything again.
+________________
+
+
+4. Edit tenant
+The edit screen includes profile details, joining/deposit/payment-cycle data, address/contact information, canteen details and document updates.
+Support:
+Edit Rahul
+Change Rahul's mobile number
+Update Rahul's address
+Change joining date
+Change deposit to ₹15,000
+Change tenant name
+Update PIN code
+Update city
+Update state
+Change relative's phone number
+Enable canteen for Rahul
+Disable canteen
+Change canteen plan
+Change rent cycle to advance paid
+Change to normal cycle
+Marathi examples:
+Rahul cha mobile number change kar
+Rahul cha address update kar
+Deposit 15000 kar
+Joining date badal
+Canteen band kar
+Hindi:
+Rahul का नंबर बदलो
+Deposit 15000 कर दो
+Joining date change करो
+Canteen चालू करो
+________________
+
+
+5. Tenant documents
+Your tenant data supports Aadhaar/photo-related documents, with slightly different document sets depending on property type.
+Bot questions:
+Show Rahul's documents
+Does Rahul have Aadhaar uploaded?
+Which documents are missing?
+Show tenants with missing documents
+How many tenants have incomplete documents?
+Upload tenant Aadhaar
+Change tenant photo
+Update parent Aadhaar
+Show tenant photo
+Is Rahul's photo available?
+Which shop tenants have missing Aadhaar?
+Marathi:
+Rahul che documents दाखव
+Rahul cha Aadhaar upload आहे का?
+कोणाचे documents pending आहेत?
+Photo नसलेले tenants दाखव
+Hindi:
+Rahul के documents दिखाओ
+Aadhaar upload है क्या?
+किन tenants के documents pending हैं?
+________________
+
+
+6. Rent — one of the most important bot areas
+The payment logic distinguishes expected, paid, balance, overdue and Paid/Partial/Pending status.
+The bot should answer:
+How much rent is pending?
+Total pending rent
+Who hasn't paid rent?
+Show unpaid tenants
+Show paid tenants
+Show partially paid tenants
+Show overdue tenants
+How much did I collect this month?
+Expected rent this month
+Balance rent this month
+How much rent is due today?
+Whose rent is due?
+Who has the highest pending rent?
+Show pending rent above ₹10,000
+Show rent due in A Wing
+Hostel pending rent
+Residential pending rent
+Shop pending rent
+How much shop rent is pending?
+How much hostel rent is pending?
+How much residential rent is pending?
+________________
+
+
+7. Individual tenant rent
+Extremely important for natural language:
+Rahul ka rent kitna hai?
+Rahul ne rent bhara kya?
+Rahul cha rent bharla ka?
+Rahul rent status
+Rahul pending
+Rahul due
+Rahul ne kitna pay kiya?
+Rahul ka kitna baki hai?
+Rahul che kiti paise baki ahet?
+Rahul's September rent
+Did Rahul pay September rent?
+Show Rahul's rent history
+Show Rahul's last payment
+When did Rahul last pay?
+How much did Rahul pay last time?
+Which months are pending for Rahul?
+Rahul cha konta month pending ahe?
+Rahul ke kaunse months pending hain?
+Rahul owes how much in total?
+Rahul paid advance?
+Rahul normal cycle pe hai kya?
+________________
+
+
+8. Time-based rent queries
+Do not hard-code only "this month." Bot must parse:
+today
+yesterday
+this week
+last week
+this month
+last month
+September
+September 2026
+August to October
+this year
+last year
+Examples:
+September collection किती झाली?
+August चा pending rent दाखव
+पिछले महीने कितना rent आया?
+इस साल total collection कितना है?
+Rent collected between 1 Sep and 15 Sep
+Last 3 months rent collection
+Compare August and September collection
+________________
+
+
+9. Payment recording
+Eventually the bot should be able to support action intents such as:
+Record Rahul's rent
+Rahul paid ₹5,000
+Add ₹3,000 payment for Rahul
+Mark September rent paid
+Record partial payment
+Rahul paid ₹2,500 cash
+Add UPI payment
+Add bank payment
+Pay remaining balance
+How much should Rahul pay to clear all dues?
+For Marathi/Hinglish:
+Rahul ne 5000 dile add kar
+Rahul cha September rent paid kar
+2500 cash payment add kar
+Rahul ka 3000 payment डालो
+For write actions, chatbot should show confirmation before saving:
+Rahul Sharma
+September 2026
+Amount: ₹5,000
+Mode: Cash
+Confirm payment?
+________________
+
+
+10. Rent cycle
+Support questions such as:
+What is normal cycle?
+What is advance paid?
+Which tenants are advance paid?
+Show normal cycle tenants
+Rahul's payment cycle
+Change Rahul to advance paid
+Advance paid tenants किती आहेत?
+Normal cycle वाले tenants दिखाओ
+________________
+
+
+11. Vacancies
+Vacancy is a major chatbot use case because your admission/shift flows already calculate vacant units.
+Questions:
+Show vacant beds
+How many beds are vacant?
+Which rooms have vacant beds?
+Show vacant rooms
+Show vacant shops
+Which shops are available?
+Any vacancy in A Wing?
+Vacancy on second floor
+Show vacancies in Building A
+Which bed is available in room 205?
+Find a vacant bed for new tenant
+Any residential room available?
+Ground floor shops available?
+Show all vacant units
+Show occupied units
+Show full rooms
+Marathi:
+रिकामे beds दाखव
+A Wing मध्ये vacancy आहे का?
+205 मध्ये bed रिकामा आहे का?
+किती shops रिकामे आहेत?
+Hindi:
+खाली beds दिखाओ
+A Wing में vacancy है क्या?
+कौनसे shops खाली हैं?
+________________
+
+
+12. Occupancy
+Your units explicitly calculate total, occupied and vacant slots.
+Support:
+What's my occupancy?
+Hostel occupancy percentage
+Residential occupancy
+Shop occupancy
+Building A occupancy
+A Wing occupancy
+Which property has most vacancy?
+Show fully occupied rooms
+Show partially occupied rooms
+How many occupied beds?
+How many vacant beds?
+________________
+
+
+13. Units / property
+Your system distinguishes Hostel, Residential and Commercial and groups units by building/property, wing and floor.
+Questions:
+Show all properties
+Show all buildings
+Show Building A
+Show A Wing
+Show first floor
+Show room 101
+Show shop S-12
+How many rooms in Building A?
+How many beds in room 101?
+What is room 101 rent?
+What is shop S-12 rent?
+Show room details
+Show meter number
+Show last meter reading
+Show flat type
+Show bed category
+________________
+
+
+14. Add/edit unit
+Your unit form supports property type, property/building, floor, room number, wing, flat type, meter information, monthly rent, bed count/category.
+Questions/actions:
+Add hostel room
+Add 4 beds to room 101
+Add residential room
+Add shop
+Create A Wing
+Add room to existing building
+Change room number
+Rename building
+Change wing
+Change floor
+Change room rent
+Change bed rent
+Change shop rent
+Update meter number
+Update meter reading
+Change flat type
+Add another bed
+Delete bed
+Delete unit
+Edit room 101
+________________
+
+
+15. Tenant shifting
+Your shift flow checks vacancies, current assignment, pending dues and provides a rent preview for an effective date.
+Questions:
+Shift Rahul
+Move Rahul to another bed
+Shift Rahul from B1 to B3
+Move Rahul to room 205
+Which beds can Rahul shift to?
+Show available rooms for Rahul
+Can I shift Rahul today?
+Shift from tomorrow
+What happens to rent if I shift Rahul today?
+Show shift rent calculation
+Does Rahul have pending rent before shifting?
+Marathi:
+Rahul ला दुसऱ्या bed वर shift कर
+Rahul साठी available beds दाखव
+आज shift केल्यावर rent किती होईल?
+Hindi:
+Rahul को दूसरे bed पर shift करो
+Rahul के लिए खाली bed दिखाओ
+आज shift करने पर rent कितना होगा?
+________________
+
+
+16. Tenant leave / checkout
+Your leave screen calculates pending cycles, deposit, deduction, refund and remaining amount due.
+Questions:
+Mark Rahul leaving
+Rahul is leaving tomorrow
+Set Rahul's leave date
+How much rent is pending before Rahul leaves?
+Calculate Rahul's settlement
+How much deposit should I refund Rahul?
+Deduct pending rent from deposit
+Don't deduct rent from deposit
+How much does Rahul still owe after deposit?
+Show leave settlement
+Who is leaving this month?
+Show upcoming leaves
+Which tenants have a leave date?
+Cancel Rahul's leave
+Marathi:
+Rahul उद्या room सोडतोय
+Rahul cha settlement काढ
+Deposit मधून pending rent deduct कर
+Rahul ला किती deposit परत द्यायचा?
+Hindi:
+Rahul कल room छोड़ रहा है
+Rahul का settlement निकालो
+Deposit से rent काटो
+कितना refund देना है?
+________________
+
+
+17. Former tenants
+Your former-tenant flow supports searching archived tenants and, within its defined conditions, restoring a tenant to an available unit.
+Questions:
+Show former tenants
+Show tenants who left
+Who left this month?
+Find former tenant Rahul
+When did Rahul leave?
+What was Rahul's old room?
+Restore Rahul
+Can Rahul be restored?
+Is Rahul's old bed available?
+Restore Rahul to old bed
+Show available unit for restoring Rahul
+________________
+
+
+18. Deposits
+Questions:
+Total deposits held
+Rahul's deposit
+Who has the highest deposit?
+Show deposits by tenant
+How much deposit is refundable?
+Show deposit for tenants leaving this month
+Deduct rent from deposit
+How much deposit remains after deduction?
+Deposit collection this month
+Who has no deposit?
+Show tenants with zero deposit
+Building A total deposits
+________________
+
+
+19. Canteen
+Your canteen settings support full food package, per-meal pricing, meal package and optional guest/extra meal charges.
+Questions:
+Is canteen enabled?
+Show canteen settings
+What is breakfast price?
+Lunch price
+Dinner price
+What is full package price?
+Which meals are included?
+What is Rahul's canteen plan?
+Who has canteen enabled?
+Show tenants without canteen
+Enable canteen for Rahul
+Disable Rahul's canteen
+Change Rahul's canteen plan
+How much canteen amount is expected this month?
+________________
+
+
+20. Canteen attendance
+The attendance screen supports meal/date selection, tenant search and attendance summaries.
+Queries:
+Today's breakfast attendance
+Today's lunch attendance
+Today's dinner attendance
+Who is present?
+Who is absent?
+Who is not marked?
+Mark Rahul present
+Mark Rahul absent
+Mark all present
+How many people had breakfast today?
+How many had lunch?
+Yesterday's dinner attendance
+Show Rahul's meal attendance
+Attendance for 10 September
+Search canteen attendance by room
+A Wing lunch attendance
+Also understand:
+Rahul present kar
+Rahul absent kar
+आज breakfast ला किती लोक होते?
+आज lunch में कितने present हैं?
+________________
+
+
+21. Staff expenses
+Your app has expense types including Employee Salary, Maushi, Security, Maintenance and Other.
+Questions:
+Show staff expenses
+Total staff expense this month
+Salary expenses
+Maushi expense
+Security expense
+Maintenance expense
+Show pending expenses
+Show paid expenses
+Add staff expense
+Add ₹10,000 salary for Ramesh
+Mark expense paid
+Edit expense
+Delete expense
+Last month's staff expenses
+Compare staff expenses
+Search expense by staff name
+________________
+
+
+22. Other/general expenses
+Bot should anticipate:
+Show expenses
+Add repair expense
+Add electricity expense
+Add maintenance expense
+Add supplies expense
+Today's expenses
+This month's expenses
+Total expenses
+Expense between two dates
+Highest expense this month
+Show expense history
+Delete expense
+Edit expense
+________________
+
+
+23. Profit/cash-flow style questions
+Where the backend has sufficient data:
+How much did I collect this month?
+How much did I spend this month?
+Collection minus expenses
+Rent collection vs expenses
+Give monthly financial summary
+How much is still receivable?
+Expected vs collected
+Important: if your backend does not contain enough data for a true profit calculation, the bot should say “I can calculate collection minus recorded expenses, but this is not accounting profit.”
+________________
+
+
+24. Wallet
+Your wallet distinguishes credits/debits and entries such as referral rewards, manual adjustments, renewal discounts and package upgrades.
+Questions:
+What's my wallet balance?
+How many coins do I have?
+Show wallet history
+How many coins did I earn?
+How many coins have I used?
+Show credits
+Show debits
+Where did these coins come from?
+When did I last use coins?
+Can I use coins for renewal?
+Can I use coins for upgrade?
+________________
+
+
+25. Referral
+Support:
+What is my referral code?
+Copy referral code
+Share referral code
+How does referral work?
+How many referral coins did I earn?
+Show referral rewards
+Who used my referral? — only answer if backend actually records it.
+How many coins do I get per referral?
+Can referral coins be used for renewal?
+The current app describes referral codes as auto-generated after a system admin becomes active after payment, with earned coins usable for renewal/package upgrade.
+________________
+
+
+26. Subscription / package
+Questions:
+What is my current plan?
+When does my subscription expire?
+How many days are left?
+What features are included?
+Does my plan include residential rooms?
+Does my plan include shops?
+Does my plan include canteen?
+How many beds can I add?
+How many beds are remaining in my quota?
+Can I add another room?
+Why can't I add a shop?
+Upgrade my package
+Show upgrade options
+Renew subscription
+How much is renewal?
+Use wallet coins for renewal
+Use wallet coins for upgrade
+________________
+
+
+27. Reports
+The bot should support report-style requests:
+Give today's report
+Give this month's report
+Rent report
+Pending rent report
+Tenant report
+Vacancy report
+Occupancy report
+Deposit report
+Expense report
+Canteen report
+Canteen attendance report
+Former tenant report
+Building-wise report
+Wing-wise report
+Room-wise report
+Shop-wise report
+Export report
+Download Excel
+Share report
+________________
+
+
+28. Import/export tenants
+Your tenant code includes spreadsheet-based tenant import conventions for hostel beds, residential rooms and commercial shops.
+Questions:
+How do I import tenants?
+Download tenant import template
+Import hostel tenants
+Import residential tenants
+Import shop tenants
+Why did my tenant import fail?
+What columns are required?
+What date format should I use?
+Can I import 100 tenants together?
+Export tenants
+Download tenant list
+Share tenant list
+________________
+
+
+29. Building / wing / floor intelligence
+Users will naturally ask aggregations:
+Building A summary
+A Wing summary
+Second floor summary
+How many tenants in A Wing?
+How many vacant beds in A Wing?
+A Wing pending rent
+A Wing total collection
+A Wing deposits
+A Wing occupancy
+Which floor has most vacancies?
+Which building has most pending rent?
+This is where your bot becomes substantially more useful than ordinary menu navigation.
+________________
+
+
+30. Combined / analytical questions
+These are essential. Don't train only one-intent questions.
+Examples:
+Show A Wing tenants who haven't paid September rent.
+दुसऱ्या floor वरचे pending rent असलेले tenants दाखव.
+A Wing में जिनका rent pending है उनको दिखाओ.
+Show vacant beds below ₹6,000 rent.
+Show tenants with pending rent above ₹10,000.
+Show tenants leaving this month who still owe rent.
+Show residential tenants with missing documents.
+Show shops with no tenant.
+Show hostel tenants with canteen but today's lunch attendance not marked.
+Which building has the most vacant beds?
+How much money will I receive if all pending rent is collected?
+Show September paid tenants in Building B.
+These require:
+entity + condition + property + date + aggregation
+rather than FAQ matching.
+________________
+
+
+31. Follow-up questions — extremely important
+The bot must retain conversation context.
+User:
+Show pending tenants.
+Bot shows them.
+Then user:
+Only A Wing.
+Bot must understand pending tenants in A Wing, not ask "what do you mean?"
+Then:
+September only.
+Then:
+How much total?
+Then:
+Who has more than 10k pending?
+Then:
+Show phone numbers.
+This is essential for a good admin assistant.
+________________
+
+
+32. Pronouns / references
+It must understand:
+Show Rahul.
+then:
+His rent?
+His deposit?
+Which room?
+Shift him.
+Available beds?
+B4.
+From tomorrow.
+Here him = Rahul and B4 = selected destination.
+Same in Marathi:
+Rahul ला दाखव
+त्याचा rent?
+deposit?
+room कोणता?
+त्याला shift कर
+available beds?
+B4 वर
+उद्यापासून
+Hindi:
+Rahul को दिखाओ
+उसका rent?
+deposit?
+कौनसा room?
+उसको shift करो
+खाली beds?
+B4
+कल से
+________________
+
+
+33. Typing mistakes
+Very important for your users. Do not require correct Marathi/Hindi/English spelling.
+Bot should understand all of these as essentially the same intent:
+pending rent
+panding rent
+pendig rent
+rent baki
+rent baki ahe
+rent rahilay
+rent due
+rent bharla nahi
+किराया बाकी
+rent pending hai
+Likewise:
+tenent / tenant / tanent
+room / rum
+vacant / vaccant / vacanty / vacancy
+diposit / deposit / deposite
+canteen / cantin / canteen
+________________
+
+
+34. Roman Marathi — this may be more important than Marathi script
+For your target users I would treat Roman Marathi as a first-class language, not a spelling mistake.
+Examples the bot absolutely needs to understand:
+Aaj kiti rent collection zhala?
+Konacha rent baki ahe?
+Rahul cha rent bharla ka?
+Kiti beds rikame ahet?
+A wing madhe vacancy ahe ka?
+Rahul la B4 var shift kar
+Rahul udya room sodnar ahe
+Tyacha deposit kiti ahe?
+Deposit madhun rent deduct kar
+Ya month cha collection sang
+Magchya month cha pending sang
+Canteen la aaj kiti present ahet?
+Former tenants dakhav
+Room 101 madhe kon ahe?
+This is critical for your app.
+________________
+
+
+35. Hinglish
+Similarly:
+Aaj kitna collection hua?
+Kiska rent pending hai?
+Rahul ka rent clear hai kya?
+Kitne beds khali hai?
+A wing me vacancy hai?
+Rahul ko B4 me shift karo
+Deposit se pending rent adjust karo
+Is month ka total due batao
+Last month ka collection batao
+Shop tenants ka pending dikhao
+Canteen attendance dikhao
+________________
+
+
+36. Navigation questions
+The chatbot can also act as an app assistant:
+Open tenants
+Go to payments
+Open vacant units
+Open room 205
+Open Rahul's profile
+Go to canteen attendance
+Open expenses
+Open wallet
+Open subscription
+Open former tenants
+Marathi:
+Payments उघड
+Rahul ची profile उघड
+Vacant beds वर घेऊन जा
+Hindi:
+Payments खोलो
+Rahul का profile खोलो
+________________
+
+
+37. “How do I?” support questions
+Don't forget support/help intent:
+How do I add a tenant?
+How do I add a bed?
+How do I record rent?
+How do I shift a tenant?
+How do I mark a tenant leaving?
+How do I restore a former tenant?
+How do I upload Aadhaar?
+How do I import tenants?
+How do I add a shop?
+How do I configure canteen?
+How do I mark attendance?
+How do I add expenses?
+How do I renew my subscription?
+How do I change password?
+The profile code also exposes password-reset, help/support, terms and logout account actions.
+________________
+
+
+38. Errors / troubleshooting
+The bot should recognize:
+Why can't I add tenant?
+Why is no vacancy showing?
+Why can't I add another bed?
+Why can't I add shop?
+Why isn't rent showing?
+Why is tenant showing overdue?
+Why can't I shift Rahul?
+Why can't I restore Rahul?
+Why is canteen attendance empty?
+Why can't I upload photo?
+Why is import failing?
+Why is my subscription blocking this?
+Why is wallet balance zero?
+Payment failed
+Data not loading
+The bot should use actual API/backend error context whenever available rather than inventing a generic explanation.
+________________
+
+
+39. Greetings and ordinary conversation
+You also need non-business conversational handling:
+Hi
+Hello
+Namaskar
+नमस्कार
+नमस्ते
+Good morning
+Kay challay?
+Kya haal hai?
+What can you do?
+Tu kay karu shakto?
+Tum kya kar sakte ho?
+Response can explain available app capabilities without leaving the rent-management context.
+________________
+
+
+40. Ambiguous questions
+If user says:
+Rahul
+Bot should search and offer Rahul's relevant record.
+If there are 3 Rahuls:
+I found 3 tenants named Rahul:
+Rahul Sharma — A Wing / 205 / B2
+Rahul Patil — B Wing / 101 / B1
+Rahul Jadhav — Shop S-12
+Which one?
+Likewise:
+205
+could mean room 205. Bot can infer likely intent but confirm if multiple properties have room 205.
+________________
+
+
+41. Confirmation-sensitive commands
+There is a big difference between:
+Rahul cha rent pending ahe ka?
+and:
+Rahul cha rent paid kar.
+First is READ.
+Second is WRITE.
+I would classify chatbot intents into:
+READ → NAVIGATE → CREATE/UPDATE → FINANCIAL → DESTRUCTIVE
+Then apply confirmation rules.
+For example:
+Delete room 205.
+Bot:
+Room 205 contains 4 beds and 3 active tenants. Deleting it would affect existing records. I won't delete it without confirmation.
+The same applies to tenant leave, payment changes, deleting beds/units, expense deletion, tenant restoration, etc.
+________________
+
+
+42. The intent architecture I recommend
+Rather than saving 5,000 literal questions, define roughly these intent families:
+dashboard.summary
+dashboard.attention
+
+
+tenant.list
+tenant.search
+tenant.details
+tenant.count
+tenant.add
+tenant.edit
+tenant.documents
+tenant.import
+tenant.export
+
+
+tenant.shift.preview
+tenant.shift.execute
+tenant.leave.preview
+tenant.leave.execute
+tenant.leave.cancel
+tenant.former.list
+tenant.former.restore
+
+
+rent.summary
+rent.expected
+rent.collected
+rent.pending
+rent.overdue
+rent.status
+rent.history
+rent.payment.add
+rent.payment.edit
+
+
+deposit.summary
+deposit.tenant
+deposit.refund
+deposit.deduction
+
+
+unit.list
+unit.search
+unit.details
+unit.add
+unit.edit
+unit.delete
+
+
+vacancy.list
+vacancy.count
+occupancy.summary
+
+
+bed.add
+bed.edit
+bed.delete
+
+
+canteen.settings
+canteen.tenant
+canteen.attendance
+canteen.attendance.mark
+canteen.summary
+
+
+expense.summary
+expense.list
+expense.add
+expense.edit
+expense.delete
+
+
+staff_expense.summary
+staff_expense.add
+staff_expense.edit
+
+
+wallet.balance
+wallet.history
+wallet.earned
+wallet.used
+
+
+referral.code
+referral.share
+referral.history
+
+
+subscription.details
+subscription.features
+subscription.quota
+subscription.renew
+subscription.upgrade
+
+
+report.generate
+report.export
+
+
+navigation.open
+
+
+help.how_to
+help.error
+
+
+conversation.greeting
+conversation.thanks
+conversation.cancel
+conversation.confirm
+Then each intent can accept entities such as:
+tenant_name
+tenant_id
+phone
+property_type
+property_name
+building
+wing
+floor
+room_no
+bed_no
+shop_no
+status
+amount
+payment_mode
+month
+year
+date
+date_from
+date_to
+canteen_meal
+expense_type
+This architecture will cover far more questions than trying to manually store every possible sentence.
+One more important point
+I would make your bot support these five input styles simultaneously:
+English: How much rent is pending in A Wing?
+Marathi: A Wing मध्ये किती भाडे बाकी आहे?
+Roman Marathi: A wing madhe kiti rent baki ahe?
+Hindi: A Wing में कितना किराया बाकी है?
+Hinglish: A wing ka kitna rent pending hai?
+All five should resolve internally to exactly the same thing:
+{
+  "intent": "rent.pending",
+  "filters": {
+    "wing": "A"
+  },
+  "aggregation": "sum"
+}
+That is the correct direction for this application. Your existing system already has enough structured concepts—property types, active tenants, vacancies, payment status, leave settlement, shifting, documents, canteen, expenses, wallet, etc.—to build a real admin assistant, rather than a basic FAQ bot.
+For implementation, I would next turn this into a developer-ready chatbot master dataset with around 300–500 canonical intents/questions × English + Marathi + Roman Marathi + Hindi + Hinglish variants, including intent, entities, API/action, confirmation_required, and example bot response. That would be directly usable for your MERN/React Native chatbot rather than just a question list.

@@ -38,7 +38,7 @@ const {
   calculateSubscriptionAmount,
   addMonths,
 } = require("../utils/saas");
-const { getUnitQuota } = require("../services/unitQuota");
+const { ensureReservedUnits, getUnitQuota } = require("../services/unitQuota");
 const {
   normalizeReferralCode,
   ensureReferralCodeForOrganization,
@@ -77,6 +77,7 @@ function publicUser(user) {
   return {
     id: String(user._id),
     name: user.name,
+    loginId: user.loginId || "",
     email: user.email,
     phone: user.phone,
     role: user.role,
@@ -161,6 +162,11 @@ function addUnits(currentUnits, addedUnits) {
 
 function hasAnyUnit(units) {
   return Number(units?.beds || 0) > 0 || Number(units?.rooms || 0) > 0 || Number(units?.shops || 0) > 0;
+}
+
+function needsUnitSetupFor(subscription, organization) {
+  const units = normalizeUnits(subscription?.units || organization?.unitAllocation || {});
+  return !hasAnyUnit(units);
 }
 
 function publicReferralCode(referral) {
@@ -264,6 +270,38 @@ function calculateUpgradeAmount(plan, addedUnits, subscription, now = new Date()
   };
 }
 
+async function findUpgradePricingPlan(subscription) {
+  if (subscription?.planId?._id) {
+    const plan = await SubscriptionPlan.findOne({
+      _id: subscription.planId._id,
+      isActive: true,
+    });
+    if (plan) return plan;
+  }
+
+  if (subscription?.durationMonths) {
+    const plan = await SubscriptionPlan.findOne({
+      durationMonths: subscription.durationMonths,
+      isActive: true,
+    }).sort({ createdAt: -1 });
+    if (plan) return plan;
+  }
+
+  return SubscriptionPlan.findOne({ isActive: true }).sort({
+    durationMonths: 1,
+    baseAmount: 1,
+    createdAt: -1,
+  });
+}
+
+function isTrialSubscription(subscription) {
+  return (
+    Number(subscription?.amount || 0) === 0 &&
+    !subscription?.planId &&
+    subscription?.status === "active"
+  );
+}
+
 async function resolveSubscriptionNotifications(subscription, organizationId) {
   if (!subscription?._id) return;
   const orgId = organizationId || subscription.organizationId;
@@ -361,14 +399,16 @@ router.post("/superadmin/bootstrap", async (req, res) => {
 
 router.post("/auth/login", async (req, res) => {
   try {
-    const email = String(req.body?.email || "").trim().toLowerCase();
+    const login = String(req.body?.email || req.body?.loginId || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
 
-    if (!email || !password) {
-      return res.status(400).json({ message: "email and password are required" });
+    if (!login || !password) {
+      return res.status(400).json({ message: "login id and password are required" });
     }
 
-    const user = await SystemUser.findOne({ email }).select("+password");
+    const user = await SystemUser.findOne({
+      $or: [{ email: login }, { loginId: login }],
+    }).select("+password");
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
     const ok = await user.comparePassword(password);
@@ -547,10 +587,15 @@ router.get("/app/bootstrap", requireSystemAuth, async (req, res) => {
       }
     }
     const subscriptionStatus = subscription?.status || null;
+    const needsUnitSetup =
+      req.systemUser.role === "system_admin" &&
+      isSubscriptionUsable(req.organization, subscription) &&
+      needsUnitSetupFor(subscription, req.organization);
     const canUseSystem =
       req.systemUser.role === "superadmin" ||
       (req.systemUser.status === "active" &&
-        isSubscriptionUsable(req.organization, subscription));
+        isSubscriptionUsable(req.organization, subscription) &&
+        !needsUnitSetup);
     const referralCode =
       req.systemUser.role === "system_admin" &&
       req.organizationId &&
@@ -569,6 +614,7 @@ router.get("/app/bootstrap", requireSystemAuth, async (req, res) => {
       access: {
         role: req.systemUser.role,
         canUseSystem,
+        needsUnitSetup,
         needsPayment:
           req.systemUser.role !== "superadmin" &&
           (organizationStatus === "pending_payment" ||
@@ -585,6 +631,68 @@ router.get("/app/bootstrap", requireSystemAuth, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+router.post(
+  "/onboarding/units",
+  requireSystemAuth,
+  requireRole("system_admin"),
+  async (req, res) => {
+    try {
+      if (!req.organizationId || !req.organization) {
+        return res.status(403).json({ message: "Organization required" });
+      }
+
+      const subscription = await Subscription.findOne({
+        organizationId: req.organizationId,
+      }).sort({ createdAt: -1 });
+
+      if (!isSubscriptionUsable(req.organization, subscription)) {
+        return res.status(402).json({
+          message: req.organization.status === "expired" || subscription?.status === "expired"
+            ? "Trial expired. Please purchase a plan."
+            : "Active trial required",
+          organizationStatus: req.organization.status,
+          subscriptionStatus: subscription?.status || null,
+          subscriptionEndDate: subscription?.endDate || null,
+        });
+      }
+
+      if (!needsUnitSetupFor(subscription, req.organization)) {
+        return res.status(400).json({ message: "Property units are already configured" });
+      }
+
+      const units = normalizeUnits(req.body?.units || req.body);
+      if (!hasAnyUnit(units)) {
+        return res.status(400).json({ message: "Enter at least one bed, room, or shop" });
+      }
+
+      subscription.units = units;
+      await subscription.save();
+
+      await ensureReservedUnits(req.organizationId, units);
+
+      req.organization.unitAllocation = units;
+      req.organization.businessType = businessTypeFromUnits(units);
+      req.organization.features = {
+        ...(req.organization.features?.toObject ? req.organization.features.toObject() : req.organization.features || {}),
+        canteenEnabled: Boolean(req.body?.canteenEnabled) && units.beds > 0,
+      };
+      await req.organization.save();
+
+      res.json({
+        organization: req.organization,
+        subscription,
+        access: {
+          canUseSystem: true,
+          needsUnitSetup: false,
+        },
+      });
+    } catch (err) {
+      console.error("onboarding units error:", err);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
 
 router.get(
   "/wallet",
@@ -831,6 +939,7 @@ router.post(
             currency: pendingExisting.currency,
             remainingDays: payload.remainingDays,
             remainingMonthFactor: payload.remainingMonthFactor,
+            fromTrial: payload.fromTrial === true,
             walletCoinsUsed: Number(pendingExisting.pricing?.walletCoinsUsed || 0),
             originalAmount: Number(payload.originalAmount || pendingExisting.pricing?.subtotal || pendingExisting.amount || 0),
           },
@@ -844,15 +953,10 @@ router.post(
 
       const currentUnits = normalizeUnits(currentSubscription.units || req.organization.unitAllocation || {});
       const newUnits = normalizeUnits(addUnits(currentUnits, addedUnits));
-      const plan = currentSubscription.planId?._id
-        ? await SubscriptionPlan.findOne({ _id: currentSubscription.planId._id, isActive: true })
-        : await SubscriptionPlan.findOne({
-            durationMonths: currentSubscription.durationMonths,
-            isActive: true,
-          }).sort({ createdAt: -1 });
+      const plan = await findUpgradePricingPlan(currentSubscription);
 
       if (!plan) {
-        return res.status(404).json({ message: "Active subscription plan not found for upgrade pricing" });
+        return res.status(404).json({ message: "No active subscription plan is available for upgrade pricing" });
       }
 
       const quote = calculateUpgradeAmount(plan, addedUnits, currentSubscription);
@@ -875,6 +979,7 @@ router.post(
         status: "created",
         requestPayload: {
           action: "subscription_upgrade",
+          fromTrial: isTrialSubscription(currentSubscription),
           requestedBy: String(req.systemUser._id),
           planId: String(plan._id),
           subscriptionId: String(currentSubscription._id),
@@ -925,6 +1030,7 @@ router.post(
           amount,
           currency,
           remainingDays: quote.remainingDays,
+          fromTrial: isTrialSubscription(currentSubscription),
           walletCoinsUsed: walletPricing.walletCoinsUsed,
           originalAmount: quote.amount,
         },
@@ -940,73 +1046,55 @@ router.post("/register", async (req, res) => {
   try {
     const businessName = String(req.body?.businessName || req.body?.organizationName || "").trim();
     const ownerName = String(req.body?.ownerName || req.body?.name || "").trim();
-    const email = String(req.body?.email || "").trim().toLowerCase();
+    const loginId = String(req.body?.loginId || req.body?.username || req.body?.email || "").trim().toLowerCase();
+    const email = String(req.body?.email || "").trim().toLowerCase() || `${loginId}@trial.local`;
     const password = String(req.body?.password || "");
 
-    if (!businessName || !ownerName || !email || !password) {
+    if (!businessName || !ownerName || !loginId || !password) {
       return res.status(400).json({
-        message: "businessName, ownerName, email and password are required",
+        message: "businessName, ownerName, loginId and password are required",
       });
     }
 
-    const existingUser = await SystemUser.exists({ email });
-    if (existingUser) return res.status(409).json({ message: "Email already registered" });
-
-    const units = normalizeUnits(req.body?.units || req.body);
-    const durationMonths = getDurationMonths(req.body);
-    const businessType = String(req.body?.businessType || "mixed").trim().toLowerCase();
-    const canteenEnabled =
-      (businessType === "hostel" || businessType === "mixed" || units.beds > 0) &&
-      Boolean(req.body?.features?.canteenEnabled ?? req.body?.canteenEnabled);
-
-    let plan = null;
-    if (req.body?.planId) {
-      plan = await SubscriptionPlan.findOne({ _id: req.body.planId, isActive: true });
-      if (!plan) return res.status(404).json({ message: "Plan not found" });
-    } else {
-      plan = await SubscriptionPlan.findOne({ durationMonths, isActive: true }).sort({
-        createdAt: -1,
-      });
+    if (password.length < 8) {
+      return res.status(400).json({ message: "Password must be at least 8 characters" });
     }
 
-    let referral = null;
-    if (req.body?.referralCode) {
-      try {
-        referral = await getUsableReferralCode(req.body.referralCode);
-      } catch (err) {
-        return res.status(err.statusCode || 400).json({ message: err.message || "Invalid referral code" });
-      }
-    }
+    const existingUser = await SystemUser.exists({
+      $or: [{ loginId }, { email }],
+    });
+    if (existingUser) return res.status(409).json({ message: "Login ID or email already registered" });
 
-    const pricing = plan
-      ? calculateSubscriptionPricing(plan, units, referral)
-      : { payableAmount: 0, referralCode: referral?.code || "" };
-    const amount = Number(pricing.payableAmount || 0);
+    const units = normalizeUnits({});
+    const now = new Date();
+    const trialEndsAt = addDays(now, 15);
     const slug = await uniqueSlug(businessName);
 
     const organization = await Organization.create({
       name: businessName,
       slug,
-      businessType,
+      businessType: "mixed",
       ownerName,
       email,
       phone: req.body?.phone || "",
       address: req.body?.address || "",
       unitAllocation: units,
       features: {
-        canteenEnabled,
+        canteenEnabled: false,
       },
-      status: "pending_payment",
+      status: "active",
+      activatedAt: now,
     });
 
     const user = await SystemUser.create({
       organizationId: organization._id,
       name: ownerName,
+      loginId,
       email,
       phone: req.body?.phone || "",
       password,
       role: "system_admin",
-      status: "pending_payment",
+      status: "active",
     });
 
     organization.createdBy = user._id;
@@ -1014,55 +1102,26 @@ router.post("/register", async (req, res) => {
 
     const subscription = await Subscription.create({
       organizationId: organization._id,
-      planId: plan?._id,
-      status: "pending_payment",
-      durationMonths: plan?.durationMonths || durationMonths,
+      status: "active",
+      startDate: now,
+      endDate: trialEndsAt,
+      durationMonths: 1,
       units,
-      amount,
-      pricing,
-      currency: plan?.currency || "INR",
+      currency: "INR",
+      amount: 0,
+      pricing: {
+        subtotal: 0,
+        payableAmount: 0,
+      },
     });
-
-    const merchantTransactionId = `M${Date.now()}${crypto.randomInt(1000, 9999)}`;
-    const transaction = await BillingTransaction.create({
-      organizationId: organization._id,
-      subscriptionId: subscription._id,
-      merchantTransactionId,
-      provider: "phonepe",
-      amount,
-      pricing,
-      currency: subscription.currency,
-      status: "created",
-    });
-
-    subscription.latestTransactionId = transaction._id;
-    await subscription.save();
-
-    let paymentIntent = null;
-    let paymentError = null;
-    try {
-      paymentIntent = await createPaymentIntent({ transaction, organization, subscription });
-      transaction.status = paymentIntent.status || "pending";
-      transaction.requestPayload = {
-        ...(transaction.requestPayload || {}),
-        requestedBy: "registration",
-        provider: paymentIntent.provider,
-        at: new Date(),
-      };
-      transaction.responsePayload = paymentIntent;
-      await transaction.save();
-    } catch (err) {
-      paymentError = err.message || "Unable to create payment request";
-      console.error("registration payment intent error:", err);
-    }
 
     await Promise.allSettled([
       notifySuperadmins({
         type: "registration",
-        title: "New system admin registered",
-        message: `${businessName} registered by ${ownerName}. Subscription will activate automatically after payment success.`,
+        title: "New trial account registered",
+        message: `${businessName} registered by ${ownerName}. Trial is active until ${trialEndsAt.toLocaleDateString("en-IN")}.`,
         actionUrl: `/superadmin/organization-detail?id=${organization._id}`,
-        priority: "high",
+        priority: "normal",
         entityType: "organization",
         entityId: organization._id,
         actionType: "registration",
@@ -1070,27 +1129,23 @@ router.post("/register", async (req, res) => {
         payload: {
           organizationId: String(organization._id),
           subscriptionId: String(subscription._id),
-          transactionId: String(transaction._id),
-          units,
-          amount,
-          referralCode: pricing.referralCode || "",
+          trial: true,
+          trialEndsAt,
         },
       }),
       notifyOrganization(organization._id, {
         type: "registration",
-        title: "Registration created",
-        message: `Welcome ${ownerName}. Your ${businessName} account is created. Complete payment to activate your subscription.`,
+        title: "Trial account created",
+        message: `Welcome ${ownerName}. Your 15-day trial is active. Login and set your property unit counts to start using the system.`,
         priority: "normal",
         entityType: "subscription",
         entityId: subscription._id,
-        actionType: "subscription_payment_required",
-        expiresAt: addDays(new Date(), 30),
+        actionType: "trial_started",
+        expiresAt: trialEndsAt,
         payload: {
           subscriptionId: String(subscription._id),
-          transactionId: String(transaction._id),
-          units,
-          amount,
-          referralCode: pricing.referralCode || "",
+          trial: true,
+          trialEndsAt,
         },
       }),
     ]);
@@ -1098,13 +1153,9 @@ router.post("/register", async (req, res) => {
     res.status(201).json({
       organization,
       user: publicUser(user),
-      token: signSystemToken(user),
       subscription,
-      transaction,
-      payment: paymentIntent,
-      paymentError,
-      referral: referral ? publicReferralCode(referral) : null,
-      message: "Registration created. Continue to PhonePe payment.",
+      trialEndsAt,
+      message: "Registration created. Login to start your 15-day trial.",
     });
   } catch (err) {
     if (err?.code === 11000) {

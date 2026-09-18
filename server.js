@@ -33,6 +33,7 @@ const invitesRouter = require("./routes/invites");
 const saasRoutes = require("./routes/saas");
 const saasPaymentRoutes = require("./routes/saasPayments");
 const auditLogRoutes = require("./routes/auditLogRoutes");
+const assistantRoutes = require("./routes/assistant");
 
 const app = express();
 
@@ -92,6 +93,7 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/api/tenant-docs", tenantDocsRoutes);
 app.use("/api/saas", saasRoutes);
 app.use("/api/saas/payments", saasPaymentRoutes);
+app.use("/api/assistant", assistantRoutes);
 app.get("/api/phonepe/checkout/:transactionId", saasPaymentRoutes.handlePhonePeCheckoutPage);
 app.post("/api/phonepe/webhook", saasPaymentRoutes.handlePhonePeWebhook);
 app.all("/api/phonepe/return", saasPaymentRoutes.handlePhonePeReturn);

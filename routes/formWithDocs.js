@@ -215,6 +215,11 @@ const firstRentMonth = String(body.firstRentMonth || rentMonth).trim();
       canteenStartDate: hasCanteen ? toDate(body.canteenStartDate) : undefined,
       canteenMonthlyAmount: hasCanteen ? toNum(body.canteenMonthlyAmount) : 0,
       canteenIncludedMeals: hasCanteen ? toMealList(body.canteenIncludedMeals) : [],
+      canteenMealPrices: hasCanteen ? {
+        breakfast: toNum(body.canteenMealPrices?.breakfast),
+        lunch: toNum(body.canteenMealPrices?.lunch),
+        dinner: toNum(body.canteenMealPrices?.dinner),
+      } : { breakfast: 0, lunch: 0, dinner: 0 },
       shopName: body.shopName,
       shopBusiness: body.shopBusiness,
       companyAddress: body.companyAddress,

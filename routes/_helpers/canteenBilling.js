@@ -63,14 +63,28 @@ function settingsForDate(organization = {}, dateKey = "") {
     };
   }
 
+  const currentEffectiveFrom =
+    current.updatedAt ||
+    organization.updatedAt ||
+    organization.createdAt ||
+    null;
+  const timeline = [...history];
+  if (current.isConfigured && currentEffectiveFrom) {
+    timeline.push({
+      effectiveFrom: currentEffectiveFrom,
+      settings: current,
+      current: true,
+    });
+  }
+
   let selected = null;
-  for (const entry of history) {
+  for (const entry of timeline.sort((a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom))) {
     const effectiveFrom = new Date(entry.effectiveFrom);
     if (!Number.isNaN(effectiveFrom.getTime()) && effectiveFrom <= targetDate) selected = entry;
   }
 
   return selected
-    ? { settings: selected.settings || current, fromHistory: true }
+    ? { settings: selected.settings || current, fromHistory: !selected.current }
     : { settings: current, fromHistory: false };
 }
 
@@ -140,7 +154,7 @@ function buildPackageQuote({ req, tenant, range, records, counts, mode, packageK
 
   for (let day = 1; day <= range.daysInMonth; day += 1) {
     const dateKey = `${range.startKey.slice(0, 8)}${String(day).padStart(2, "0")}`;
-    if (dateKey < activeStartKey) continue;
+    if (dateKey < activeStartKey || !canteenActiveOnDate(tenant, dateFromKey(dateKey))) continue;
 
     const dated = settingsForDate(req.organization || {}, dateKey);
     const daySettings = dated.settings || req.organization?.canteenSettings || {};
@@ -152,14 +166,15 @@ function buildPackageQuote({ req, tenant, range, records, counts, mode, packageK
 
     if (billingMethod === "fixed_monthly") {
       if (monthlyAmount <= 0) continue;
-      const amount = Math.round(monthlyAmount / range.daysInMonth);
+      if (dateKey !== activeStartKey) continue;
+      const amount = Math.round(monthlyAmount);
       expected += amount;
       addBreakdownItem(breakdown, {
         label,
         billingMethod,
         amount,
         monthlyAmount,
-        presentDays: 1,
+        presentDays: range.daysInMonth,
         daysInMonth: range.daysInMonth,
         mealCounts: counts,
       });
@@ -187,7 +202,7 @@ function buildPackageQuote({ req, tenant, range, records, counts, mode, packageK
 
 function canCalculateCanteen(req, tenant = {}, monthKey = "") {
   if (!req.organization?.features?.canteenEnabled) return false;
-  if (!tenant.hasCanteen || tenant.propertyType !== "bed") return false;
+  if (tenant.propertyType !== "bed") return false;
   const range = monthDateRange(monthKey);
   if (!range) return false;
   if (tenant.canteenStartDate) {
@@ -195,6 +210,18 @@ function canCalculateCanteen(req, tenant = {}, monthKey = "") {
     if (!Number.isNaN(startDate.getTime()) && startDate > range.end) return false;
   }
   return true;
+}
+
+function canteenActiveOnDate(tenant = {}, date) {
+  const history = Array.isArray(tenant.canteenStatusHistory)
+    ? tenant.canteenStatusHistory.filter((entry) => entry?.effectiveFrom)
+      .sort((a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom))
+    : [];
+  let enabled = Boolean(tenant.hasCanteen);
+  history.forEach((entry) => {
+    if (new Date(entry.effectiveFrom) <= date) enabled = Boolean(entry.enabled);
+  });
+  return enabled;
 }
 
 async function getCanteenQuoteForMonth(req, tenant = {}, monthKey = "") {
@@ -291,9 +318,11 @@ async function getCanteenQuoteForMonth(req, tenant = {}, monthKey = "") {
   if (mode === "per_meal") {
     const breakdown = [];
     records.forEach((record) => {
-      if (!MEALS.includes(record.meal)) return;
+      if (!MEALS.includes(record.meal) || !canteenActiveOnDate(tenant, dateFromKey(record.dateKey))) return;
       const dated = settingsForDate(req.organization || {}, record.dateKey);
-      const prices = dated.settings?.perMeal || settings.perMeal || {};
+      const prices = tenant.canteenMealPrices && Object.values(tenant.canteenMealPrices).some((value) => Number(value) > 0)
+        ? tenant.canteenMealPrices
+        : dated.settings?.perMeal || settings.perMeal || {};
       const rate = Number(prices[record.meal] || 0);
       if (rate <= 0) return;
       const existing = breakdown.find((item) => item.label === record.meal && item.rate === rate);

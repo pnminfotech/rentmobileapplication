@@ -10,6 +10,7 @@ const systemUserSchema = new mongoose.Schema(
       index: true,
     },
     name: { type: String, required: true, trim: true },
+    loginId: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
     email: { type: String, required: true, trim: true, lowercase: true, unique: true },
     phone: { type: String, trim: true, default: "" },
     password: { type: String, required: true, select: false },
