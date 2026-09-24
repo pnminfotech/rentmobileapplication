@@ -342,16 +342,19 @@ router.get("/forms/rent-summary", async (req, res) => {
     if (!parsed) return res.status(400).json({ message: "Valid month is required" });
     const [tenants, rooms] = await Promise.all([Form.find(scopedQuery(req)).lean(), Room.find(scopedQuery(req)).lean()]);
     const rows = await Promise.all(tenants.filter((tenant) => tenant.intakeStatus !== "pending_tenant").map(async (tenant) => {
-      const expected = getExpectedRentForMonth(tenant, parsed.y, parsed.m, rooms);
+      const grossExpected = getExpectedRentForMonth(tenant, parsed.y, parsed.m, rooms);
       const paid = getPaidAmountForMonth(tenant.rents, parsed.y, parsed.m);
       const canteen = await getCanteenQuoteForMonth(req, tenant, req.query.month);
       const lightBill = await getLightBillQuoteForMonth(req, tenant, req.query.month);
       const rentEntry = (tenant.rents || []).find((entry) => entry.month === req.query.month);
+      const discount = Math.max(0, Number(rentEntry?.discountAmount || 0));
+      const expected = Math.max(0, grossExpected - discount);
       const canteenPaid = Number(rentEntry?.canteenAmount || 0);
       const lightBillPaid = Number(rentEntry?.lightBillAmount || 0);
       return {
         tenantId: tenant._id,
         expected,
+        discount,
         paid,
         balance: Math.max(expected - paid, 0),
         canteenExpected: Number(canteen.expected || 0),
@@ -438,14 +441,18 @@ router.get("/form/:id/rent-quote", async (req, res) => {
     const canteen = await getCanteenQuoteForMonth(req, tenant, req.query.month);
     const lightBill = await getLightBillQuoteForMonth(req, tenant, req.query.month);
     const existingEntry = (tenant.rents || []).find((rent) => rent.month === req.query.month);
+    const discount = Math.max(0, Number(existingEntry?.discountAmount || 0));
+    const adjustedRentExpected = Math.max(0, Number(breakdown.expected || 0) - discount);
     const canteenPaid = Number(existingEntry?.canteenAmount || 0);
     const lightBillPaid = Number(existingEntry?.lightBillAmount || 0);
-    const rentBalance = Math.max(breakdown.expected - paid, 0);
+    const rentBalance = Math.max(adjustedRentExpected - paid, 0);
     const canteenBalance = Math.max(Number(canteen.expected || 0) - canteenPaid, 0);
     const lightBillBalance = Math.max(Number(lightBill.expected || 0) - lightBillPaid, 0);
     res.json({
       month: req.query.month,
       ...breakdown,
+      expected: adjustedRentExpected,
+      discount,
       paid,
       balance: rentBalance,
       canteen: {
@@ -458,7 +465,7 @@ router.get("/form/:id/rent-quote", async (req, res) => {
         paid: lightBillPaid,
         balance: lightBillBalance,
       },
-      totalExpected: Number(breakdown.expected || 0) + Number(canteen.expected || 0) + Number(lightBill.expected || 0),
+      totalExpected: adjustedRentExpected + Number(canteen.expected || 0) + Number(lightBill.expected || 0),
       totalPaid: paid + canteenPaid + lightBillPaid,
       totalBalance: rentBalance + canteenBalance + lightBillBalance,
     });

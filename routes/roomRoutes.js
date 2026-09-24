@@ -654,7 +654,7 @@ router.post("/:roomId/beds", async (req, res) => {
 
 router.post("/:roomId/bed", async (req, res) => {
   const { roomId } = req.params;
-  let { bedNo, bedCategory, price } = req.body || {};
+  let { bedNo, bedCategory, price, usePlaceholder, placeholderRoomId } = req.body || {};
 
   try {
     if (!bedNo) return res.status(400).json({ message: "Missing bedNo" });
@@ -670,7 +670,31 @@ router.post("/:roomId/bed", async (req, res) => {
     );
     if (exists) return res.status(400).json({ message: "Bed already exists in this room" });
 
-    await assertUnitCapacity(req.organizationId, { beds: 1 });
+    let usedPlaceholder = null;
+    try {
+      await assertUnitCapacity(req.organizationId, { beds: 1 });
+    } catch (quotaErr) {
+      if (!usePlaceholder || quotaErr?.code !== "UNIT_LIMIT_EXCEEDED") {
+        throw quotaErr;
+      }
+
+      const placeholderQuery = {
+        propertyType: "bed",
+        isPlaceholder: true,
+        ...(placeholderRoomId ? { _id: placeholderRoomId } : {}),
+      };
+      usedPlaceholder = await Room.findOne(scopedQuery(req, placeholderQuery)).sort({ roomNo: 1 });
+      if (!usedPlaceholder) {
+        return res.status(400).json({ message: "No pending bed unit is available to use" });
+      }
+
+      const activeTenant = await Form.findOne(scopedQuery(req, activeTenantQueryForUnit(usedPlaceholder))).lean();
+      if (activeTenant) {
+        return res.status(400).json({
+          message: "Selected pending unit cannot be used because a tenant is assigned to it",
+        });
+      }
+    }
 
     bedNo = normalizeIdentifier(bedNo);
     bedCategory = bedCategory ? normalizeText(bedCategory) : "";
@@ -683,8 +707,15 @@ router.post("/:roomId/bed", async (req, res) => {
 
     room.beds.push({ bedNo, bedCategory, price });
     await room.save();
+    if (usedPlaceholder?._id) {
+      await Room.deleteOne(scopedQuery(req, { _id: usedPlaceholder._id, isPlaceholder: true }));
+    }
 
-    res.json({ message: "Bed added successfully", room });
+    res.json({
+      message: usedPlaceholder ? "Pending unit used and bed added successfully" : "Bed added successfully",
+      room,
+      usedPlaceholderId: usedPlaceholder?._id,
+    });
   } catch (err) {
     res.status(err.status || 500).json({
       message: err.message || "Internal server error",
@@ -721,6 +752,67 @@ router.post("/:roomId/bed", async (req, res) => {
 //     res.status(500).json({ message: "Internal server error" });
 //   }
 // });
+
+router.post("/:roomId/bed/from-placeholder", async (req, res) => {
+  const { roomId } = req.params;
+  let { bedNo, bedCategory, price, placeholderRoomId } = req.body || {};
+
+  try {
+    if (!bedNo) return res.status(400).json({ message: "Missing bedNo" });
+
+    const room = await Room.findOne(scopedQuery(req, { _id: roomId }));
+    if (!ensureScopedDocument(req, room, res, "Room not found")) return;
+    if (normalizePropertyType(room.propertyType) !== "bed") {
+      return res.status(400).json({ message: "Additional beds are allowed only for bed-wise properties" });
+    }
+
+    bedNo = normalizeIdentifier(bedNo);
+    const exists = (room.beds || []).some(
+      (b) => String(b.bedNo).trim().toLowerCase() === String(bedNo).trim().toLowerCase()
+    );
+    if (exists) return res.status(400).json({ message: "Bed already exists in this room" });
+
+    const placeholderQuery = {
+      propertyType: "bed",
+      isPlaceholder: true,
+      ...(placeholderRoomId ? { _id: placeholderRoomId } : {}),
+    };
+    const placeholder = await Room.findOne(scopedQuery(req, placeholderQuery)).sort({ roomNo: 1 });
+    if (!placeholder) {
+      return res.status(400).json({ message: "No pending bed unit is available to use" });
+    }
+
+    const activeTenant = await Form.findOne(scopedQuery(req, activeTenantQueryForUnit(placeholder))).lean();
+    if (activeTenant) {
+      return res.status(400).json({ message: "Selected pending unit cannot be used because a tenant is assigned to it" });
+    }
+
+    bedCategory = bedCategory ? normalizeText(bedCategory) : "";
+    if (price === undefined || price === "") price = null;
+    else {
+      price = Number(price);
+      if (Number.isNaN(price)) price = null;
+    }
+
+    room.beds.push({ bedNo, bedCategory, price });
+    await room.save();
+    await Room.deleteOne(scopedQuery(req, { _id: placeholder._id, isPlaceholder: true }));
+
+    const updatedRoom = await Room.findOne(scopedQuery(req, { _id: room._id })).lean();
+    res.status(201).json({
+      message: "Pending unit used and bed added successfully",
+      room: updatedRoom,
+      usedPlaceholderId: placeholder._id,
+      quota: await getUnitQuota(req.organizationId),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || "Internal server error",
+      code: err.code,
+      details: err.details,
+    });
+  }
+});
 
 router.put("/:roomId/bed/:bedNo", async (req, res) => {
   const { roomId, bedNo } = req.params;

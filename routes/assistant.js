@@ -1,5 +1,5 @@
 const express = require("express");
-const { requireSystemAuth } = require("../middleware/saasAuth");
+const { requireSystemAuth, requireRole } = require("../middleware/saasAuth");
 const rentHistoryHelpers = require("./_helpers/rentHistory");
 const {
   catalogResponse,
@@ -477,7 +477,7 @@ function makeFacts({ tenants, rooms, staffExpenses = [], otherExpenses = [], lig
 }
 
 
-router.post("/ask", requireSystemAuth, async (req, res) => {
+router.post("/ask", requireSystemAuth, requireRole("system_admin"), async (req, res) => {
   try {
     const { question } = req.body;
     if (!question || typeof question !== "string") {
@@ -519,7 +519,7 @@ router.post("/ask", requireSystemAuth, async (req, res) => {
   }
 });
 
-router.get("/questions", requireSystemAuth, (_req, res) => {
+router.get("/questions", requireSystemAuth, requireRole("system_admin"), (_req, res) => {
   res.json({ categories: catalogResponse(), source: "local-question-catalog" });
 });
 

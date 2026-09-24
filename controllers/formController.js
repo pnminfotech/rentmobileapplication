@@ -541,6 +541,7 @@ const updateForm = async (req, res) => {
     utr,
     note,
     receiptUrl,
+    discountAmount,
   } = req.body;
   const resolvedMonth = normalizeRentMonth(month, date);
   const resolvedDate = new Date(date);
@@ -578,6 +579,7 @@ const updateForm = async (req, res) => {
     const shouldReplace = rentUpdateMode === "replace";
     const resolvedPaymentMode = paymentMode === "Online" ? "Online" : "Cash";
     const safeReceiptUrl = String(receiptUrl || "").trim();
+    const normalizedDiscountAmount = Math.max(0, Number(discountAmount || 0) || 0);
 
     if (!Number.isFinite(incomingAmount) || incomingAmount <= 0) {
       return res.status(400).json({ message: "Rent amount must be greater than zero." });
@@ -589,7 +591,7 @@ const updateForm = async (req, res) => {
 
     const parsedMonth = parseMonthKey(resolvedMonth);
     const rentRooms = await Room.find(scopedQuery(req)).lean();
-    const expectedRent = parsedMonth ? getExpectedRentForMonth(form.toObject(), parsedMonth.y, parsedMonth.m, rentRooms) : 0;
+    const expectedRent = parsedMonth ? Math.max(getExpectedRentForMonth(form.toObject(), parsedMonth.y, parsedMonth.m, rentRooms) - normalizedDiscountAmount, 0) : 0;
     const paidRent = parsedMonth ? getPaidAmountForMonth(normalizedRents, parsedMonth.y, parsedMonth.m) : 0;
     const canteenQuote = await getCanteenQuoteForMonth(req, form.toObject(), resolvedMonth);
     const existingCanteenPaid = normalizedRents
@@ -612,6 +614,7 @@ const updateForm = async (req, res) => {
       canteenAmount: split.canteenPart,
       lightBillAmount: split.lightBillPart,
       extraAmount: split.extraPart,
+      discountAmount: normalizedDiscountAmount,
       date: resolvedDate,
       paymentMode: resolvedPaymentMode,
       utr: String(utr || "").trim(),
@@ -629,6 +632,7 @@ const updateForm = async (req, res) => {
         rentAmount: shouldReplace ? split.rentPart : existingAmount + split.rentPart,
         canteenAmount: shouldReplace ? split.canteenPart : existingCanteenAmount + split.canteenPart,
         lightBillAmount: shouldReplace ? split.lightBillPart : existingLightBillAmount + split.lightBillPart,
+        discountAmount: normalizedDiscountAmount,
         totalAmount: shouldReplace ? incomingAmount : existingTotalAmount + incomingAmount,
         date: resolvedDate,
         month: resolvedMonth,
@@ -645,6 +649,7 @@ const updateForm = async (req, res) => {
         rentAmount: split.rentPart,
         canteenAmount: split.canteenPart,
         lightBillAmount: split.lightBillPart,
+        discountAmount: normalizedDiscountAmount,
         totalAmount: incomingAmount,
         date: resolvedDate,
         month: resolvedMonth,

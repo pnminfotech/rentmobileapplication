@@ -207,6 +207,7 @@ firstRentMonth: { type: String }, // e.g. "Jan-26"
     rents: [
       {
         rentAmount: { type: Number, required: true },
+        discountAmount: { type: Number, default: 0 },
         canteenAmount: { type: Number, default: 0 },
         lightBillAmount: { type: Number, default: 0 },
         totalAmount: { type: Number, default: 0 },
@@ -226,6 +227,7 @@ firstRentMonth: { type: String }, // e.g. "Jan-26"
             {
               amount: { type: Number, required: true },
               rentAmount: { type: Number, default: 0 },
+              discountAmount: { type: Number, default: 0 },
               canteenAmount: { type: Number, default: 0 },
               lightBillAmount: { type: Number, default: 0 },
               extraAmount: { type: Number, default: 0 },

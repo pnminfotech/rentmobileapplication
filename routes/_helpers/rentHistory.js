@@ -423,6 +423,14 @@ function getPaidAmountForMonth(rents = [], y, m) {
   }, 0);
 }
 
+function getDiscountAmountForMonth(rents = [], y, m) {
+  return (Array.isArray(rents) ? rents : []).reduce((discount, rent) => {
+    const paidMonth = getPaymentMonth(rent);
+    if (!paidMonth || paidMonth.y !== y || paidMonth.m !== m) return discount;
+    return Math.max(discount, Math.max(0, toNum(rent?.discountAmount)));
+  }, 0);
+}
+
 function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = [], options = {}) {
   const includePartialCycle = Boolean(options.includePartialCycle);
   const cutoff = toValidDate(cutoffDate);
@@ -463,7 +471,7 @@ function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = [], option
       chargeUntil.setDate(chargeUntil.getDate() + 1);
       chargeUntil.setHours(0, 0, 0, 0);
     }
-    const expected = isPartial && includePartialCycle
+    const grossExpected = isPartial && includePartialCycle
       ? Math.round((fullCycle.segments || []).reduce((sum, segment) => {
           const from = toValidDate(segment.from);
           const to = toValidDate(segment.to);
@@ -474,6 +482,8 @@ function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = [], option
           return sum + (toNum(segment.monthlyRate) * days / Math.max(fullCycle.totalDays || 0, 1));
         }, 0))
       : fullCycle.expected;
+    const discount = getDiscountAmountForMonth(tenant.rents, y, m);
+    const expected = Math.max(0, grossExpected - discount);
 
     if (expected > 0) {
       const paid = getPaidAmountForMonth(tenant.rents, y, m);
@@ -483,6 +493,7 @@ function getUnpaidRentBeforeDate(tenant = {}, cutoffDate, roomsData = [], option
         unpaid.push({
           month: formatMonthKey(y, m),
           expected,
+          discount,
           paid,
           outstanding,
           cycleStart,
@@ -527,9 +538,10 @@ function getRentCyclesBetweenDates(tenant = {}, startValue, endValue, roomsData 
     cycleEnd.setMonth(cycleEnd.getMonth() + 1);
     if (cycleEnd > end) break;
     if (cycleEnd >= start) {
-      const expected = getExpectedRentForMonth(tenant, y, m, roomsData);
+      const discount = getDiscountAmountForMonth(tenant.rents, y, m);
+      const expected = Math.max(0, getExpectedRentForMonth(tenant, y, m, roomsData) - discount);
       const paid = getPaidAmountForMonth(tenant.rents, y, m);
-      cycles.push({ month: formatMonthKey(y, m), cycleStart, cycleEnd, expected, paid, pending: Math.max(expected - paid, 0) });
+      cycles.push({ month: formatMonthKey(y, m), cycleStart, cycleEnd, expected, discount, paid, pending: Math.max(expected - paid, 0) });
     }
     cursorYM += 1;
   }

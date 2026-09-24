@@ -790,7 +790,32 @@ router.post("/subscription/renew-request", requireSystemAuth, async (req, res) =
         subscriptionId: pendingExisting._id,
         status: { $in: ["created", "pending"] },
       }).sort({ createdAt: -1 });
-      return res.json({ subscription: pendingExisting, transaction });
+      if (transaction) {
+        return res.json({ subscription: pendingExisting, transaction });
+      }
+
+      const retryTransaction = await BillingTransaction.create({
+        organizationId: req.organizationId,
+        subscriptionId: pendingExisting._id,
+        merchantTransactionId: `RENREQ${Date.now()}${crypto.randomInt(1000, 9999)}`,
+        provider: "phonepe",
+        amount: Number(pendingExisting.amount || 0),
+        pricing: pendingExisting.pricing || {
+          subtotal: Number(pendingExisting.amount || 0),
+          payableAmount: Number(pendingExisting.amount || 0),
+        },
+        currency: pendingExisting.currency || "INR",
+        status: "created",
+        requestPayload: {
+          action: "renewal_request",
+          requestedBy: String(req.systemUser._id),
+          retryForSubscriptionId: String(pendingExisting._id),
+          useWallet: req.body?.useWallet === true,
+        },
+      });
+      pendingExisting.latestTransactionId = retryTransaction._id;
+      await pendingExisting.save();
+      return res.json({ subscription: pendingExisting, transaction: retryTransaction });
     }
 
     let plan = null;
@@ -1717,6 +1742,14 @@ router.get(
   async (_req, res) => {
     await expireDueSubscriptions();
 
+    // The dashboard chart must be based on payment records, not placeholder
+    // values. Start at the first day of the month five months ago so the
+    // response always contains the latest six calendar months.
+    const trendStart = new Date();
+    trendStart.setHours(0, 0, 0, 0);
+    trendStart.setDate(1);
+    trendStart.setMonth(trendStart.getMonth() - 5);
+
     const [
       totalOrganizations,
       activeOrganizations,
@@ -1729,6 +1762,7 @@ router.get(
       successfulPayments,
       pendingPayments,
       latestOrganizations,
+      monthlyRevenue,
     ] = await Promise.all([
       Organization.countDocuments(),
       Organization.countDocuments({ status: "active" }),
@@ -1767,7 +1801,31 @@ router.get(
         .limit(8)
         .select("name ownerName email phone status createdAt")
         .lean(),
+      BillingTransaction.aggregate([
+        { $match: { status: "success", createdAt: { $gte: trendStart } } },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$createdAt" },
+              month: { $month: "$createdAt" },
+            },
+            amount: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
+
+    const revenueTrend = Array.from({ length: 6 }, (_, offset) => {
+      const date = new Date(trendStart.getFullYear(), trendStart.getMonth() + offset, 1);
+      const match = monthlyRevenue.find((item) => item._id.year === date.getFullYear() && item._id.month === date.getMonth() + 1);
+      return {
+        key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+        label: date.toLocaleString("en-US", { month: "short" }),
+        amount: match?.amount || 0,
+        count: match?.count || 0,
+      };
+    });
 
     res.json({
       organizations: {
@@ -1786,6 +1844,7 @@ router.get(
         successfulAmount: successfulPayments[0]?.total || 0,
         successfulCount: successfulPayments[0]?.count || 0,
         pendingTransactions: (pendingPayments[0]?.count || 0) + pendingSubscriptions,
+        trend: revenueTrend,
       },
       latestOrganizations,
     });
